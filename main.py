@@ -1673,9 +1673,11 @@ SOCIAL_CARD_SCHEMA = {
     "properties": {
         "hook": {"type": "string", "description": "A short, genuinely curiosity-driving headline (under 60 characters) — makes someone stop scrolling. Must be a real, true claim, never exaggerated or misleading."},
         "subtext": {"type": "string", "description": "1-2 sentences of real explanation, grounded only in the provided content"},
+        "icon": {"type": "string", "description": "ONE single emoji that genuinely fits the topic (e.g. 🎬 for cinema, 💰 for tax, 🛡️ for scams) — exactly one emoji character, nothing else"},
+        "label": {"type": "string", "description": "A short 1-3 word category label in capitals, e.g. 'CINEMA RIGHTS' or 'CONSUMER LAW'"},
         "source_page": {"type": "string", "description": "Which [Source: ...] tag this was grounded in"},
     },
-    "required": ["hook", "subtext", "source_page"],
+    "required": ["hook", "subtext", "icon", "label", "source_page"],
 }
 
 
@@ -1697,15 +1699,14 @@ AVAILABLE CONTENT:
 Pick ONE genuinely surprising angle and write:
 - hook: under 60 characters, punchy, creates real curiosity — but every word must be something the content below actually supports. Curiosity in FRAMING is the goal; never curiosity through exaggeration or a misleading implication.
 - subtext: 1-2 sentences of real explanation, grounded only in the content above
+- icon: exactly one emoji that genuinely fits the topic
+- label: a short 1-3 word category label in capitals (e.g. "CINEMA RIGHTS", "TAX BASICS")
 - source_page: which [Source: ...] tag this came from
 
 The test: if someone fact-checked this hook against the actual content, it should hold up completely. Surprising and true, not surprising because it's stretched."""
 
 
-def wrap_and_draw(draw, text, font, x, y, max_width_px, fill, line_height):
-    # Wraps text to fit a pixel width rather than a fixed character count,
-    # since headline lengths vary a lot — a naive fixed-width wrap either
-    # overflows on wide characters or wastes space on narrow ones.
+def wrap_lines(draw, text, font, max_width_px):
     words = text.split()
     lines, current = [], ""
     for word in words:
@@ -1718,43 +1719,102 @@ def wrap_and_draw(draw, text, font, x, y, max_width_px, fill, line_height):
             current = word
     if current:
         lines.append(current)
-    for line in lines:
-        draw.text((x, y), line, font=font, fill=fill)
-        y += line_height
-    return y
+    return lines
 
 
-def render_social_card(hook, subtext):
+def draw_centered(draw, text, font, cx, y, fill):
+    w = draw.textlength(text, font=font)
+    draw.text((cx - w / 2, y), text, font=font, fill=fill)
+
+
+def render_emoji_layer(font_dir, icon, target_size, opacity=1.0):
+    # NotoColorEmoji is a fixed-size bitmap font (only renders correctly
+    # at its native ~109px) — render small, then resize the IMAGE to the
+    # size we actually want, never ask the font itself for a bigger size.
+    f = ImageFont.truetype(os.path.join(font_dir, "NotoColorEmoji.ttf"), 109)
+    small = Image.new('RGBA', (130, 130), (0, 0, 0, 0))
+    d = ImageDraw.Draw(small)
+    d.text((65, 65), icon, font=f, anchor="mm", embedded_color=True)
+    big = small.resize((target_size, target_size), Image.LANCZOS)
+    if opacity < 1.0:
+        alpha = big.split()[3].point(lambda p: int(p * opacity))
+        big.putalpha(alpha)
+    return big
+
+
+def render_social_card(hook, subtext, label, icon="\U0001F4A1"):
+    # Matches rights-shorts.html's actual design system precisely (same
+    # gradient, badge, watermark, footer band) rather than a generic card —
+    # the site already has a proven-good visual identity for this exact
+    # format, so this replicates it in PIL instead of inventing a new look.
     W, H = 1080, 1920
-    img = Image.new('RGB', (W, H), '#0D1117')
+    img = Image.new('RGBA', (W, H), (13, 17, 23, 255))
     draw = ImageDraw.Draw(img)
 
+    stops = [(0x0D, 0x11, 0x17), (0x13, 0x1B, 0x29), (0x0D, 0x11, 0x17)]
     for y in range(H):
         t = y / H
-        r = int(0x0D + (0x1a - 0x0D) * t)
-        g = int(0x11 + (0x20 - 0x11) * t)
-        b = int(0x17 + (0x36 - 0x17) * t)
+        if t <= 0.5:
+            t2 = t / 0.5
+            c0, c1 = stops[0], stops[1]
+        else:
+            t2 = (t - 0.5) / 0.5
+            c0, c1 = stops[1], stops[2]
+        r = int(c0[0] + (c1[0] - c0[0]) * t2)
+        g = int(c0[1] + (c1[1] - c0[1]) * t2)
+        b = int(c0[2] + (c1[2] - c0[2]) * t2)
         draw.line([(0, y), (W, y)], fill=(r, g, b))
 
     font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
-    bold_72 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 72)
+    bold_58 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 58)
+    bold_36 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 36)
     bold_32 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 32)
-    reg_40 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Regular.ttf"), 40)
+    bold_50 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 50)
+    reg_38 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Regular.ttf"), 38)
+    reg_32 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Regular.ttf"), 32)
+    ACCENT = (0xC9, 0xA2, 0x27)
 
-    draw.rounded_rectangle([(80, 140), (560, 210)], radius=35, fill='#C9A227')
-    draw.text((110, 155), "DID YOU KNOW?", font=bold_32, fill='#0D1117')
+    draw.rectangle([(0, 0), (W, 16)], fill=ACCENT)
 
-    y = wrap_and_draw(draw, hook, bold_72, 80, 320, W - 160, '#FFFFFF', 90)
-    y = wrap_and_draw(draw, subtext, reg_40, 80, y + 40, W - 160, '#D1D5DB', 52)
+    wm = render_emoji_layer(font_dir, icon, 700, opacity=0.06)
+    img.alpha_composite(wm, (int(W / 2 - 350), 1150))
+    draw = ImageDraw.Draw(img)
 
-    draw.rounded_rectangle([(80, H - 280), (W - 80, H - 190)], radius=20, outline='#F5D76E', width=3)
-    draw.text((130, H - 260), "Full story on our website →", font=bold_32, fill='#F5D76E')
+    badge_text = "DID YOU KNOW?"
+    bw = draw.textlength(badge_text, font=bold_36) + 76
+    draw.rounded_rectangle([(W / 2 - bw / 2, 300), (W / 2 + bw / 2, 378)], radius=39, fill=ACCENT)
+    draw_centered(draw, badge_text, bold_36, W / 2, 320, (13, 17, 23))
 
-    draw.text((80, H - 120), "LawSticker AI", font=bold_72.font_variant(size=48), fill='#C9A227')
-    draw.text((80, H - 70), "lawsticker-ai.com", font=reg_40.font_variant(size=30), fill='#9CA3AF')
+    icon_layer = render_emoji_layer(font_dir, icon, 150)
+    img.alpha_composite(icon_layer, (int(W / 2 - 75), 500))
+    draw = ImageDraw.Draw(img)
+
+    lines = wrap_lines(draw, hook, bold_58, W - 160)
+    y = 700
+    for line in lines:
+        draw_centered(draw, line, bold_58, W / 2, y, (255, 255, 255))
+        y += 80
+    fact_end = y
+
+    draw.line([(140, fact_end + 40), (W - 140, fact_end + 40)], fill=(201, 162, 39, 150), width=3)
+
+    draw_centered(draw, label, bold_32, W / 2, fact_end + 85, ACCENT)
+    detail_lines = wrap_lines(draw, subtext, reg_38, W - 200)
+    yy = fact_end + 145
+    for line in detail_lines:
+        draw_centered(draw, line, reg_38, W / 2, yy, (255, 255, 255, 204))
+        yy += 52
+
+    draw.rectangle([(0, H - 300), (W, H)], fill=(28, 25, 15, 255))
+    draw_centered(draw, "LawSticker AI", bold_50, W / 2, H - 215, (245, 215, 110))
+    draw_centered(draw, "Your rights. Your language. Free.", reg_32, W / 2, H - 155, (255, 255, 255, 180))
+    draw_centered(draw, "lawsticker-ai.com", bold_36, W / 2, H - 95, (245, 215, 110))
+
+    icon_footer = render_emoji_layer(font_dir, "\u2696\uFE0F", 56)
+    img.alpha_composite(icon_footer, (int(W / 2 - 260), H - 245))
 
     buf = io.BytesIO()
-    img.save(buf, format='PNG')
+    img.convert('RGB').save(buf, format='PNG')
     return buf.getvalue()
 
 
@@ -1778,7 +1838,10 @@ def daily_social_card():
         if not card_data or not card_data.get("hook"):
             return jsonify({"ok": False, "error": "AI returned an unexpected format."}), 500
 
-        image_bytes = render_social_card(card_data["hook"], card_data["subtext"])
+        image_bytes = render_social_card(
+            card_data["hook"], card_data["subtext"],
+            card_data.get("label", "DURGA BRO"), card_data.get("icon", "💡"),
+        )
 
         caption = (
             f"📲 <b>Today's shareable card</b>\n\n"
