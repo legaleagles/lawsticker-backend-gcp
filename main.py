@@ -122,7 +122,7 @@ def answer_callback_query(bot_token, callback_query_id, text=""):
         return json.loads(resp.read().decode())
 
 
-def send_telegram_photo(bot_token, chat_id, image_bytes, caption=""):
+def send_telegram_photo(bot_token, chat_id, image_bytes, caption="", button_text=None, button_url=None):
     # Telegram's sendPhoto needs multipart/form-data, not JSON like every
     # other call here — building the multipart body by hand to avoid
     # pulling in a new dependency just for this one upload.
@@ -133,6 +133,9 @@ def send_telegram_photo(bot_token, chat_id, image_bytes, caption=""):
     parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode())
     parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n".encode())
     parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"parse_mode\"\r\n\r\nHTML\r\n".encode())
+    if button_text and button_url:
+        markup = json.dumps({"inline_keyboard": [[{"text": button_text, "url": button_url}]]})
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"reply_markup\"\r\n\r\n{markup}\r\n".encode())
     parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"card.png\"\r\nContent-Type: image/png\r\n\r\n".encode())
     parts.append(image_bytes)
     parts.append(f"\r\n--{boundary}--\r\n".encode())
@@ -653,6 +656,48 @@ def call_gemini_structured(api_key, prompt, schema, max_tokens=600):
         result = json.loads(resp.read().decode())
     raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw_text)
+
+
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
+
+
+def call_gemini_image(api_key, art_prompt):
+    # Free-tier image model, used ONLY for background art — explicitly
+    # told never to render any text or letters, so the AI's well-known
+    # weakness (garbled/inaccurate text-in-image) never touches the actual
+    # facts on the card. The exact hook/subtext text is always drawn
+    # separately and exactly, in render_social_card. Returns None on any
+    # failure so the caller can safely fall back to the plain gradient —
+    # this is a visual nice-to-have, never something that should be able
+    # to break the card entirely.
+    full_prompt = (
+        art_prompt +
+        " IMPORTANT: the image must contain absolutely no text, no letters, "
+        "no words, no numbers, no typography of any kind — pure abstract "
+        "visual/background art only. Vertical portrait orientation, dark "
+        "moody navy and gold color palette, professional and elegant, "
+        "suitable as a background behind text that will be added separately."
+    )
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_IMAGE_URL}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            result = json.loads(resp.read().decode())
+        for part in result["candidates"][0]["content"]["parts"]:
+            if "inlineData" in part:
+                return base64.b64decode(part["inlineData"]["data"])
+        return None
+    except Exception:
+        return None
 
 
 def filter_relevant_entries_askai(question, entries, topic=None, prev_question=None, max_entries=10):
@@ -1675,9 +1720,10 @@ SOCIAL_CARD_SCHEMA = {
         "subtext": {"type": "string", "description": "1-2 sentences of real explanation, grounded only in the provided content"},
         "icon": {"type": "string", "description": "ONE single emoji that genuinely fits the topic (e.g. 🎬 for cinema, 💰 for tax, 🛡️ for scams) — exactly one emoji character, nothing else"},
         "label": {"type": "string", "description": "A short 1-3 word category label in capitals, e.g. 'CINEMA RIGHTS' or 'CONSUMER LAW'"},
+        "art_theme": {"type": "string", "description": "A short visual theme description for abstract background art matching the topic's mood (e.g. 'golden scales of justice silhouette, dramatic lighting' or 'cinema film reel and spotlight, moody atmosphere') — describe mood and abstract imagery only, never mention any text or words appearing in the image"},
         "source_page": {"type": "string", "description": "Which [Source: ...] tag this was grounded in"},
     },
-    "required": ["hook", "subtext", "icon", "label", "source_page"],
+    "required": ["hook", "subtext", "icon", "label", "art_theme", "source_page"],
 }
 
 
@@ -1701,6 +1747,7 @@ Pick ONE genuinely surprising angle and write:
 - subtext: 1-2 sentences of real explanation, grounded only in the content above
 - icon: exactly one emoji that genuinely fits the topic
 - label: a short 1-3 word category label in capitals (e.g. "CINEMA RIGHTS", "TAX BASICS")
+- art_theme: a short visual mood/imagery description for abstract background art matching this topic (e.g. "golden scales of justice silhouette, dramatic lighting" or "cinema film reel and spotlight beams, moody atmosphere") — imagery and mood only, never mention text or words
 - source_page: which [Source: ...] tag this came from
 
 The test: if someone fact-checked this hook against the actual content, it should hold up completely. Surprising and true, not surprising because it's stretched."""
@@ -1742,28 +1789,64 @@ def render_emoji_layer(font_dir, icon, target_size, opacity=1.0):
     return big
 
 
-def render_social_card(hook, subtext, label, icon="\U0001F4A1"):
+def render_social_card(hook, subtext, label, icon="\U0001F4A1", ai_background_bytes=None):
     # Matches rights-shorts.html's actual design system precisely (same
-    # gradient, badge, watermark, footer band) rather than a generic card —
-    # the site already has a proven-good visual identity for this exact
-    # format, so this replicates it in PIL instead of inventing a new look.
+    # badge, watermark, footer band) — the background is now either real
+    # Gemini-generated art (hybrid approach) or the original flat gradient
+    # as a safe fallback if AI generation wasn't available that day. Either
+    # way, every word of text is drawn separately and exactly by PIL —
+    # never regenerated by the AI — so the facts on the card are always
+    # guaranteed accurate regardless of which background was used.
     W, H = 1080, 1920
     img = Image.new('RGBA', (W, H), (13, 17, 23, 255))
     draw = ImageDraw.Draw(img)
 
-    stops = [(0x0D, 0x11, 0x17), (0x13, 0x1B, 0x29), (0x0D, 0x11, 0x17)]
-    for y in range(H):
-        t = y / H
-        if t <= 0.5:
-            t2 = t / 0.5
-            c0, c1 = stops[0], stops[1]
-        else:
-            t2 = (t - 0.5) / 0.5
-            c0, c1 = stops[1], stops[2]
-        r = int(c0[0] + (c1[0] - c0[0]) * t2)
-        g = int(c0[1] + (c1[1] - c0[1]) * t2)
-        b = int(c0[2] + (c1[2] - c0[2]) * t2)
-        draw.line([(0, y), (W, y)], fill=(r, g, b))
+    used_ai_background = False
+    if ai_background_bytes:
+        try:
+            bg = Image.open(io.BytesIO(ai_background_bytes)).convert('RGBA')
+            # Cover-fit crop to exactly W x H, same idea as CSS background-size:cover
+            bg_ratio = bg.width / bg.height
+            target_ratio = W / H
+            if bg_ratio > target_ratio:
+                new_h = H
+                new_w = int(H * bg_ratio)
+            else:
+                new_w = W
+                new_h = int(W / bg_ratio)
+            bg = bg.resize((new_w, new_h), Image.LANCZOS)
+            left = (new_w - W) // 2
+            top = (new_h - H) // 2
+            bg = bg.crop((left, top, left + W, top + H))
+            img.alpha_composite(bg)
+            # Dark overlay so white text stays legible over busier AI art —
+            # same principle as a movie poster's gradient over a photo.
+            overlay = Image.new('RGBA', (W, H), (13, 17, 23, 0))
+            odraw = ImageDraw.Draw(overlay)
+            for y in range(H):
+                t = y / H
+                a = int(90 + 90 * abs(t - 0.5) * 2)  # darker at top/bottom, lighter in the middle
+                odraw.line([(0, y), (W, y)], fill=(13, 17, 23, a))
+            img.alpha_composite(overlay)
+            draw = ImageDraw.Draw(img)
+            used_ai_background = True
+        except Exception:
+            used_ai_background = False
+
+    if not used_ai_background:
+        stops = [(0x0D, 0x11, 0x17), (0x13, 0x1B, 0x29), (0x0D, 0x11, 0x17)]
+        for y in range(H):
+            t = y / H
+            if t <= 0.5:
+                t2 = t / 0.5
+                c0, c1 = stops[0], stops[1]
+            else:
+                t2 = (t - 0.5) / 0.5
+                c0, c1 = stops[1], stops[2]
+            r = int(c0[0] + (c1[0] - c0[0]) * t2)
+            g = int(c0[1] + (c1[1] - c0[1]) * t2)
+            b = int(c0[2] + (c1[2] - c0[2]) * t2)
+            draw.line([(0, y), (W, y)], fill=(r, g, b))
 
     font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
     bold_58 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 58)
@@ -1838,21 +1921,35 @@ def daily_social_card():
         if not card_data or not card_data.get("hook"):
             return jsonify({"ok": False, "error": "AI returned an unexpected format."}), 500
 
+        # Hybrid approach: AI generates the background art (mood/imagery
+        # only, explicitly forbidden from rendering any text), while every
+        # word on the card is still drawn exactly by PIL — never
+        # regenerated visually — so accuracy is never at risk. If image
+        # generation fails for any reason, render_social_card falls back
+        # to the plain gradient automatically.
+        ai_background = None
+        art_theme = card_data.get("art_theme")
+        if art_theme:
+            ai_background = call_gemini_image(gemini_key, art_theme)
+
         image_bytes = render_social_card(
             card_data["hook"], card_data["subtext"],
             card_data.get("label", "DURGA BRO"), card_data.get("icon", "💡"),
+            ai_background_bytes=ai_background,
         )
 
+        source_page = card_data.get('source_page', '')
+        page_url = f"https://lawsticker-ai.com/{source_page}.html" if source_page else "https://lawsticker-ai.com"
         caption = (
             f"📲 <b>Today's shareable card</b>\n\n"
             f"Forward this to your WhatsApp Status, Instagram, or wherever — "
-            f"ready as-is.\n\n"
-            f"Source: lawsticker-ai.com/{card_data.get('source_page', '')}.html"
+            f"ready as-is."
         )
         results = {}
         for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
             try:
-                send_telegram_photo(bot_token, cid, image_bytes, caption)
+                send_telegram_photo(bot_token, cid, image_bytes, caption,
+                                     button_text="🔗 Read Full Story", button_url=page_url)
                 results[cid] = "sent"
             except Exception as e:
                 results[cid] = f"failed: {e}"
