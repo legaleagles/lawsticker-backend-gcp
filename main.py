@@ -32,13 +32,13 @@ GITHUB_API = "https://api.github.com"
 # just kept once here instead of duplicated across files.
 # ---------------------------------------------------------------------------
 
-def github_get(path, token):
+def github_get(path, token, timeout=15):
     req = urllib.request.Request(
         f"{GITHUB_API}/repos/{REPO}/contents/{path}",
         headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
             content = base64.b64decode(data["content"]).decode()
             return json.loads(content), data["sha"]
@@ -48,7 +48,7 @@ def github_get(path, token):
         raise
 
 
-def github_put(path, token, content_obj, sha, message):
+def github_put(path, token, content_obj, sha, message, timeout=15):
     body = json.dumps(content_obj, indent=2, ensure_ascii=False).encode()
     payload = {"message": message, "content": base64.b64encode(body).decode(), "branch": "main"}
     if sha:
@@ -59,7 +59,7 @@ def github_put(path, token, content_obj, sha, message):
         headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json", "Content-Type": "application/json"},
         method="PUT",
     )
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status
 
 
@@ -469,15 +469,734 @@ def site_watchers():
 
 
 # ---------------------------------------------------------------------------
+# 6. Ask Durga Bro (+ Scam Verify topic) — Gemini-powered legal Q&A
+# ---------------------------------------------------------------------------
+
+KB_FILE = "knowledge-base.json"
+GEMINI_MODEL = "gemini-flash-lite-latest"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+MAX_QUESTION_LEN = 500
+
+ASKAI_STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for",
+             "of", "and", "or", "my", "me", "i", "do", "does", "can", "what", "how", "if",
+             "it", "this", "that", "be", "have", "has", "will", "should", "would", "am"}
+
+TOPIC_PAGE_MAP = {
+    "consumer": ["rights-consumer"], "property": ["rights-property"], "family": ["rights-family"],
+    "health": ["rights-health"], "digital": ["rights-digital"], "farmer": ["rights-farmer"],
+    "personal": ["rights-personal"], "student": ["rights-student"],
+    "lawcet": ["lawcet"],
+    "llbsubjects": ["subjects"],
+    "calculators": ["limitation-calc", "court-fee-calc", "chit-fund-calc", "electricity-calc",
+                     "gold-loan-calc", "gold-calculator", "eligibility-calculator"],
+}
+
+TOPIC_LABELS = {
+    "consumer": "Consumer Rights", "property": "Property Rights", "family": "Family Rights",
+    "health": "Health Rights", "digital": "Digital Rights", "farmer": "Farmer Rights",
+    "personal": "Personal Rights", "student": "Student Rights",
+    "lawcet": "LAWCET Counselling", "calculators": "Site Calculators", "llbsubjects": "LLB Subjects",
+    "scam_verify": "Check a Scam",
+}
+
+PUBLIC_SCAM_FILE = "scam-reports.json"
+SCAM_VERIFY_RISK_LEVELS = ["High Concern", "Some Concern", "Low Concern", "Not Enough Information"]
+SCAM_VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk_level": {"type": "string", "enum": SCAM_VERIFY_RISK_LEVELS},
+        "red_flags_found": {"type": "array", "items": {"type": "string"}, "description": "Specific warning signs identified in THIS situation, empty array if none"},
+        "matches_known_pattern": {"type": "boolean", "description": "True only if this genuinely resembles a pattern in the provided reported cases"},
+        "matched_category": {"type": "string", "description": "Which category it resembles, empty string if matches_known_pattern is false"},
+        "reasoning": {"type": "string", "description": "2-3 sentences explaining the assessment, plain and simple language"},
+        "advice": {"type": "string", "description": "Practical next steps — what to check or do, plain simple language"},
+    },
+    "required": ["risk_level", "red_flags_found", "matches_known_pattern", "matched_category", "reasoning", "advice"],
+}
+
+
+def summarize_known_scam_patterns(entries, max_entries=20):
+    lines = []
+    for e in entries[-max_entries:]:
+        enrichment = e.get("enrichment", {})
+        signals = e.get("signals", {})
+        line = f"- Category: {e.get('category', 'Other')}"
+        if enrichment.get("scam_type_label"):
+            line += f" | Type: {enrichment['scam_type_label']}"
+        if signals.get("contact_method"):
+            line += f" | Contact: {signals['contact_method']}"
+        if signals.get("ask_action"):
+            line += f" | Asked for: {signals['ask_action']}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "No reported cases in the database yet."
+
+
+def build_scam_verify_prompt(situation, known_patterns_summary, lang):
+    lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
+    return f"""You are Durga Bro, checking whether a described situation shows signs of being a scam.
+
+REPORTED PATTERNS FROM OUR COMMUNITY DATABASE (real, anonymized cases):
+{known_patterns_summary}
+
+USER'S SITUATION:
+{situation}
+
+Analyze honestly and produce, in {lang_names.get(lang, "English")}:
+- risk_level: your genuine, calibrated assessment. Do NOT default to "High Concern" just to be safe — only use it when the situation clearly shows real warning signs. Use "Not Enough Information" honestly when the description is too vague to judge.
+- red_flags_found: concrete warning signs actually present in what they described — do not invent flags that aren't there
+- matches_known_pattern: true ONLY if this situation genuinely resembles one of the reported patterns above — do not force a match
+- matched_category: which category, only if matches_known_pattern is true
+- reasoning: explain your assessment plainly — why you landed on this risk level
+- advice: practical next steps in simple language — what to verify, who to contact if genuinely worried (mention Cybercrime Helpline 1930 or NALSA 15100 only if genuinely relevant)
+
+Be honest and calibrated — false alarms erode trust just as much as missed warnings. If this looks like a completely normal, legitimate interaction, say so plainly rather than manufacturing concern."""
+
+
+def call_gemini_structured(api_key, prompt, schema):
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "maxOutputTokens": 600,
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        result = json.loads(resp.read().decode())
+    raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+    return json.loads(raw_text)
+
+
+def filter_relevant_entries_askai(question, entries, topic=None, prev_question=None, max_entries=10):
+    topic_pages = set(TOPIC_PAGE_MAP.get(topic, [])) if topic else set()
+
+    combined_text = question + (" " + prev_question if prev_question else "")
+    q_words = {w for w in combined_text.lower().split() if w not in ASKAI_STOPWORDS and len(w) > 2}
+    if not q_words:
+        if topic_pages:
+            topic_entries = [e for e in entries if e["source_page"] in topic_pages]
+            return topic_entries[:max_entries] if topic_entries else entries[:max_entries]
+        return entries[:max_entries]
+
+    scored = []
+    for e in entries:
+        text = " ".join([
+            e["title"].get("en", ""), e["tag"].get("en", ""), e["body"].get("en", ""),
+        ]).lower()
+        score = sum(1 for w in q_words if w in text)
+        if e["source_page"] in topic_pages:
+            score += 5
+        scored.append((score, e))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    relevant = [e for score, e in scored if score > 0][:max_entries]
+    return relevant if relevant else entries[:max_entries]
+
+
+def build_askai_prompt(question, entries, lang, prev_question=None, prev_answer=None, topic_label=None):
+    lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
+    context_blocks = []
+    for e in entries:
+        title = e["title"].get(lang) or e["title"].get("en", "")
+        body = e["body"].get(lang) or e["body"].get("en", "")
+        context_blocks.append(f"[Source: {e['source_page']}]\nTitle: {title}\nContent: {body}")
+    context = "\n\n".join(context_blocks)
+
+    topic_block = ""
+    if topic_label:
+        topic_block = f"""
+ACTIVE TOPIC: The user selected "{topic_label}" as what they want to discuss. If the new question is clearly and obviously about something else entirely (not a related follow-up, not this topic phrased differently), do NOT answer it — instead reply only with a brief, friendly note that this chat is currently focused on {topic_label}, and ask whether they'd like to switch topics or ask something related to {topic_label} instead. If the question is genuinely related to {topic_label} (even loosely), answer normally.
+"""
+
+    conversation_block = ""
+    if prev_question and prev_answer:
+        conversation_block = f"""
+PREVIOUS EXCHANGE (for context — the new question may be a follow-up to this):
+Previous question: {prev_question[:300]}
+Previous answer: {prev_answer[:600]}
+"""
+
+    prompt = f"""You are "Durga Bro" — the AI legal-rights assistant on LawSticker AI, an Indian legal-rights education website. You are named after the site's founder, who is known by that name among his own LLB friends and community, but you are an AI agent, not that person. If the user ever directly asks whether you are a real person, whether you are the actual Durga, or who/what you are, you must clearly and honestly say you are an AI agent modeled to help the way he would, not the real person. Never claim or imply you are human or the actual founder.
+{topic_block}{conversation_block}
+Answer using the APPROVED CONTENT below wherever it's relevant. For anything the approved content doesn't cover, you may still help using your own general knowledge of Indian law — the line that matters is NOT the topic, it's the type of claim within your answer:
+
+- SPECIFIC CLAIMS (exact numbers, deadlines, fees, compensation amounts, section numbers, filing procedures, forms) must ONLY ever come from the APPROVED CONTENT below. Never invent or infer a specific figure or deadline that isn't stated there.
+- GENERAL GUIDANCE (what kind of remedy exists, which body to approach, broad concepts, what a law is generally about) can come from your own knowledge of Indian law when the approved content doesn't cover the topic — this is genuinely useful even without site-verified specifics.
+
+If the new question is a vague follow-up (like "explain more", "tell me more about this"), interpret it in light of the PREVIOUS EXCHANGE above, not as a brand new standalone topic. If there's no previous exchange and the question is too vague to answer on its own, say so honestly rather than guessing at an unrelated topic.
+
+Decide per answer, honestly, which case you're in:
+- If your answer relies only on the APPROVED CONTENT (even if you also add general context around it), end with: [Source: page-name] (the exact page name from the content used).
+- If any part of your answer draws on your own general knowledge because the approved content didn't cover it, end with exactly: [General Knowledge] instead — and say plainly in the answer that this part isn't from the site's verified content.
+- If you're not confident either way, say so honestly and suggest a professional or legal aid clinic. Do not guess at specific figures under any circumstances.
+
+FORMATTING: Structure the answer for readability, not one dense paragraph. Use **bold** for key terms (like the name of a law), and short bullet points (using "-") for lists of options, steps, or remedies where that fits better than prose. Keep it skimmable on a phone screen.
+
+IMPORTANT: Output ONLY the final answer itself. Do not show your classification, reasoning, or any meta-commentary about which case applies — the person should just see a clean, direct answer.
+
+RULES THAT APPLY EITHER WAY:
+- Answer in {lang_names.get(lang, "English")}.
+- Keep the answer concise and practical — a few sentences or a short list, not an essay.
+- Never state a specific number, deadline, or amount that isn't in the approved content, even inside an otherwise general-knowledge answer.
+
+APPROVED CONTENT:
+{context}
+
+USER QUESTION: {question}"""
+    return prompt
+
+
+def build_bill_prompt(entries, lang):
+    lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
+    context_blocks = []
+    for e in entries:
+        if e["source_page"] != "rights-consumer":
+            continue
+        title = e["title"].get(lang) or e["title"].get("en", "")
+        body = e["body"].get(lang) or e["body"].get("en", "")
+        context_blocks.append(f"Title: {title}\nContent: {body}")
+    context = "\n\n".join(context_blocks)
+
+    prompt = f"""You are looking at an uploaded restaurant/shop bill (photo or document) for a visitor to LawSticker AI, an Indian consumer-rights education website.
+
+Using ONLY the approved consumer-rights content below, check the bill for common issues and explain what you find in plain, practical language:
+- Is there a "service charge" line item? If so, note that service charge is optional in India (per CCPA Guidelines 2022) and the customer can ask for it to be removed.
+- Do the individual item prices and totals add up correctly? Point out any arithmetic mismatch you can actually see in the image.
+- Is there anything charged that looks unusual or unclearly labeled?
+
+STRICT RULES:
+- Only state legal facts that appear explicitly in the approved content below. Never invent legal information not stated here.
+- Only comment on what you can actually see in the image — do not guess at numbers you cannot read clearly.
+- Answer in {lang_names.get(lang, "English")}.
+- Keep it concise and practical.
+- End with: [Source: rights-consumer]
+
+APPROVED CONTENT:
+{context}"""
+    return prompt
+
+
+def call_gemini_askai(api_key, prompt, image_base64=None, image_mime_type=None):
+    parts = [{"text": prompt}]
+    if image_base64:
+        parts.append({"inline_data": {"mime_type": image_mime_type or "image/jpeg", "data": image_base64}})
+    payload = json.dumps({
+        "contents": [{"parts": parts}],
+        "generationConfig": {"maxOutputTokens": 550},
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        result = json.loads(resp.read().decode())
+    try:
+        return result["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        return None
+
+
+@app.route('/api/ask-ai', methods=['POST'])
+def ask_ai():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        question = (body.get("question") or "").strip()[:MAX_QUESTION_LEN]
+        lang = body.get("lang", "en")
+        if lang not in ("en", "te", "hi"):
+            lang = "en"
+        image_base64 = body.get("image_base64")
+        image_mime_type = body.get("image_mime_type")
+        topic = body.get("topic")
+        prev_question = (body.get("previous_question") or "").strip()[:300] or None
+        prev_answer = (body.get("previous_answer") or "").strip()[:600] or None
+
+        if not question and not image_base64:
+            return jsonify({"ok": False, "error": "No question or image provided."}), 400
+
+        if topic == "scam_verify" and question:
+            try:
+                public_data, _ = github_get(PUBLIC_SCAM_FILE, site_token, timeout=1.5)
+                scam_entries = (public_data or {}).get("entries", [])
+            except Exception:
+                scam_entries = []
+            known_patterns_summary = summarize_known_scam_patterns(scam_entries)
+            verify_prompt = build_scam_verify_prompt(question, known_patterns_summary, lang)
+            try:
+                verify_result = call_gemini_structured(gemini_key, verify_prompt, SCAM_VERIFY_SCHEMA)
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode()
+                if e.code == 429:
+                    return jsonify({"ok": False, "error": f"BUSY_RIGHT_NOW: {error_body[:200]}"})
+                return jsonify({"ok": False, "error": f"AI service error: {error_body[:300]}"})
+            except Exception:
+                verify_result = None
+
+            if not verify_result:
+                return jsonify({"ok": False, "error": "AI service returned an unexpected response."})
+
+            return jsonify({"ok": True, "result_type": "scam_verify", "result": verify_result})
+
+        kb, _ = github_get(KB_FILE, site_token, timeout=1.5)
+        entries = (kb or {}).get("entries", [])
+
+        if image_base64:
+            prompt = build_bill_prompt(entries, lang)
+        else:
+            relevant_entries = filter_relevant_entries_askai(question, entries, topic, prev_question)
+            prompt = build_askai_prompt(question, relevant_entries, lang, prev_question, prev_answer, TOPIC_LABELS.get(topic))
+
+        try:
+            answer = call_gemini_askai(gemini_key, prompt, image_base64, image_mime_type)
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            if e.code == 429:
+                return jsonify({"ok": False, "error": f"BUSY_RIGHT_NOW: {error_body[:200]}"})
+            return jsonify({"ok": False, "error": f"AI service error: {error_body[:300]}"})
+
+        if answer is None:
+            return jsonify({"ok": False, "error": "AI service returned an unexpected response."})
+
+        return jsonify({"ok": True, "result_type": "text", "answer": answer})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# 7. Scam-Ed — structured scam report submission
+# ---------------------------------------------------------------------------
+
+PENDING_FILE = "scam-reports-pending.json"
+MAX_STORY_LEN = 2000
+
+SCAMED_CATEGORIES = ["Phone Scam", "Online Shopping", "Investment", "Job Offer",
+              "Loan/Financial", "Digital/Cyber", "Pyramid Scheme/MLM", "Other"]
+
+SCAMED_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string", "enum": SCAMED_CATEGORIES},
+        "title": {"type": "string", "description": "5-8 word anonymized title describing the pattern, not the person"},
+        "anonymized_story": {"type": "string", "description": "Story rewritten with all names, businesses, phone numbers, and locations removed"},
+        "remedy_advice": {"type": "string", "description": "Practical legal remedy advice for the user"},
+    },
+    "required": ["category", "title", "anonymized_story", "remedy_advice"],
+}
+
+
+def compose_narrative(fields):
+    parts = []
+    if fields.get("contact_method"):
+        parts.append(f"Contacted via: {fields['contact_method']}.")
+    if fields.get("offer_claim"):
+        parts.append(f"They were offering/claiming: {fields['offer_claim']}.")
+    if fields.get("ask_action"):
+        parts.append(f"They asked the user to: {fields['ask_action']}.")
+    if fields.get("suspicion_trigger"):
+        parts.append(f"What first raised suspicion: {fields['suspicion_trigger']}.")
+    cost_items = fields.get("cost_items") or []
+    if cost_items:
+        cost_line = f"What it cost the user: {', '.join(cost_items)}."
+        if "Money" in cost_items and fields.get("money_range"):
+            cost_line += f" Approximate range: {fields['money_range']}."
+        parts.append(cost_line)
+    if fields.get("extra_details"):
+        parts.append(f"Additional details: {fields['extra_details']}.")
+    return " ".join(parts)
+
+
+def build_scamed_prompt(story, entries, lang):
+    lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
+    context_blocks = []
+    for e in entries:
+        title = e["title"].get(lang) or e["title"].get("en", "")
+        body = e["body"].get(lang) or e["body"].get("en", "")
+        context_blocks.append(f"[Source: {e['source_page']}]\nTitle: {title}\nContent: {body}")
+    context = "\n\n".join(context_blocks)
+
+    prompt = f"""You are processing a scam-experience submission for LawSticker AI's "Scam-Ed" feature — a community scam-awareness archive. The submission below comes from a structured form (not free text), so treat each piece as a factual answer to a specific question.
+
+Analyze the user's submission below and produce:
+- category: pick the single best-fitting category
+- title: a short anonymized title describing the SCAM PATTERN, not the person or business
+- anonymized_story: a clear, specific 2-4 sentence narrative synthesizing the submission below — describe the actual technique used (how contact happened, what was offered, what was asked for, what gave it away) with ALL names, business names, phone numbers, email addresses, and specific locations removed. This should read as a genuinely informative account of the scam pattern, not a vague summary.
+- remedy_advice: practical advice for the user, answered in {lang_names.get(lang, "English")}
+
+For remedy_advice specifically:
+- Prefer the APPROVED CONTENT below wherever relevant. Specific claims (exact numbers, deadlines, fees, section numbers) must ONLY come from the APPROVED CONTENT.
+- If the approved content doesn't cover it, general guidance from your own knowledge of Indian law is fine, but say plainly this part isn't from the site's verified content.
+- Keep it concise and practical.
+- Use simple, everyday language a common person can easily understand — avoid formal or overly technical wording.
+- If a genuinely relevant national helpline exists (fraud/cybercrime: 1930, NALSA legal aid: 15100), mention it.
+- If the submission doesn't actually describe a scam (sounds like a personal dispute, refund disagreement, etc.), say so honestly rather than forcing a categorization.
+- Some victims lose things other than money — time, trust, emotional wellbeing, safety. If the "cost" mentions any of these, acknowledge it genuinely rather than only addressing financial loss.
+
+APPROVED CONTENT:
+{context}
+
+USER'S SUBMISSION:
+{story}"""
+    return prompt
+
+
+@app.route('/api/scam-ed', methods=['POST'])
+def scam_ed():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        lang = body.get("lang", "en")
+        if lang not in ("en", "te", "hi"):
+            lang = "en"
+
+        fields = {
+            "contact_method": (body.get("contact_method") or "").strip()[:100],
+            "offer_claim": (body.get("offer_claim") or "").strip()[:200],
+            "ask_action": (body.get("ask_action") or "").strip()[:100],
+            "suspicion_trigger": (body.get("suspicion_trigger") or "").strip()[:300],
+            "cost_items": [str(c).strip()[:60] for c in (body.get("cost_items") or [])][:10],
+            "money_range": (body.get("money_range") or "").strip()[:50],
+            "extra_details": (body.get("extra_details") or "").strip()[:800],
+        }
+        story = compose_narrative(fields)[:MAX_STORY_LEN]
+
+        if not story:
+            return jsonify({"ok": False, "error": "No details provided."}), 400
+
+        kb, _ = github_get(KB_FILE, site_token, timeout=2)
+        entries = (kb or {}).get("entries", [])
+        relevant_entries = filter_relevant_entries_scamed(story, entries)
+        prompt = build_scamed_prompt(story, relevant_entries, lang)
+
+        try:
+            parsed = call_gemini_structured(gemini_key, prompt, SCAMED_RESPONSE_SCHEMA)
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            if e.code == 429:
+                return jsonify({"ok": False, "error": "BUSY_RIGHT_NOW"})
+            return jsonify({"ok": False, "error": f"AI service error: {error_body[:200]}"})
+
+        if not parsed or not parsed.get("remedy_advice"):
+            return jsonify({"ok": False, "error": "AI service returned an unexpected response."})
+
+        internal_id = f"scam-{int(datetime.now(timezone.utc).timestamp())}"
+        ref_number = "SE-" + internal_id.split("-")[1][-6:]
+        try:
+            pending, sha = github_get(PENDING_FILE, site_token, timeout=2.5)
+            if pending is None:
+                pending = {"entries": []}
+        except Exception:
+            pending, sha = {"entries": []}, None
+        pending.setdefault("entries", []).append({
+            "id": internal_id,
+            "ref_number": ref_number,
+            "original_story": story,
+            "structured_fields": fields,
+            "category": parsed["category"],
+            "title": parsed["title"],
+            "anonymized_story": parsed["anonymized_story"],
+            "lang": lang,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "status": "pending",
+        })
+        pending["entries"] = pending["entries"][-500:]
+        github_put(PENDING_FILE, site_token, pending, sha, "New scam submission pending review", timeout=2.5)
+
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if bot_token and chat_id:
+            try:
+                alert_text = (
+                    f"🛡️ <b>New Scam-Ed Report</b> ({ref_number})\n"
+                    f"Category: {parsed['category']}\n"
+                    f"Title: {parsed['title']}\n"
+                    f"Review at: lawsticker-ai.com/scam-ed-moderate.html"
+                )
+                send_telegram_to_all(bot_token, chat_id, alert_text)
+            except Exception:
+                pass
+
+        under_review_note = {
+            "en": f"\n\n📋 Your report is saved under reference {ref_number}. It's under review and will appear on the Scam Stories page once approved — no need to resubmit.",
+            "te": f"\n\n📋 మీ నివేదిక {ref_number} రిఫరెన్స్‌తో సేవ్ చేయబడింది. ఇది సమీక్షలో ఉంది, ఆమోదించిన తర్వాత Scam Stories పేజీలో కనిపిస్తుంది — మళ్లీ సమర్పించాల్సిన అవసరం లేదు.",
+            "hi": f"\n\n📋 आपकी रिपोर्ट संदर्भ {ref_number} के तहत सहेजी गई है। यह समीक्षा में है और स्वीकृत होने पर Scam Stories पेज पर दिखाई देगी — दोबारा सबमिट करने की आवश्यकता नहीं है।",
+        }
+        answer_with_ref = parsed["remedy_advice"] + under_review_note.get(lang, under_review_note["en"])
+
+        return jsonify({"ok": True, "answer": answer_with_ref, "ref_number": ref_number})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def filter_relevant_entries_scamed(text, entries, max_entries=8):
+    q_words = {w for w in text.lower().split() if w not in ASKAI_STOPWORDS and len(w) > 2}
+    if not q_words:
+        return entries[:max_entries]
+    scored = []
+    for e in entries:
+        body = " ".join([e["title"].get("en", ""), e["tag"].get("en", ""), e["body"].get("en", "")]).lower()
+        score = sum(1 for w in q_words if w in body)
+        scored.append((score, e))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    relevant = [e for score, e in scored if score > 0][:max_entries]
+    return relevant if relevant else entries[:max_entries]
+
+
+# ---------------------------------------------------------------------------
+# 8. Scam Moderate — approve/reject/takedown/restore, password-gated
+# ---------------------------------------------------------------------------
+
+PUBLIC_FILE = "scam-reports.json"
+ARCHIVE_FILE = "scam-reports-archived.json"
+
+ENRICH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scam_type_label": {"type": "string", "description": "Short, well-known name for this scam pattern type, e.g. 'Pyramid Scheme / MLM Fraud'"},
+        "modus_operandi": {"type": "string", "description": "2-3 sentences on how this type of scam generically operates, based on well-known patterns"},
+        "red_flags": {"type": "array", "items": {"type": "string"}, "description": "3-5 short, practical warning signs to watch for"},
+        "relevant_laws": {"type": "array", "items": {"type": "string"}, "description": "Names of well-established Indian Acts/laws relevant to this scam type — ONLY Act names, never case citations"},
+        "prevalence_note": {"type": "string", "description": "One honest, qualitative sentence on how common/known this pattern is — no invented statistics"},
+        "supportive_note": {"type": "string", "description": "A brief, warm, reassuring message for both the person who experienced this and future readers"},
+    },
+    "required": ["scam_type_label", "modus_operandi", "red_flags", "relevant_laws", "prevalence_note", "supportive_note"],
+}
+
+
+def call_gemini_enrichment(api_key, category, anonymized_story, lang):
+    lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
+    prompt = f"""You are enriching an approved, anonymized scam report for LawSticker AI's public "Scam Stories & Remedies" education page — a real person will read this to learn and feel supported.
+
+Category: {category}
+Story: {anonymized_story}
+
+Produce, in {lang_names.get(lang, "English")}:
+- scam_type_label: the well-known name for this pattern (e.g. "Pyramid Scheme / MLM Fraud", "Phishing / OTP Scam")
+- modus_operandi: how scams of this general type typically work — genuinely informative, not vague
+- red_flags: 3-5 concrete, practical warning signs
+- relevant_laws: ONLY the names of well-established Indian Acts/laws relevant to this scam type (e.g. "Consumer Protection Act 2019", "Prize Chits and Money Circulation Schemes (Banning) Act 1978", "Information Technology Act 2000"). Do NOT cite specific court cases, judgments, or rulings — those cannot be verified here and must never be invented.
+- prevalence_note: one honest, qualitative sentence on how commonly this pattern is reported — do not invent statistics or percentages
+- supportive_note: warm, genuine reassurance — for the person who went through this, and for anyone reading this to learn
+
+Stay factual and general. If you're not confident about a specific law applying, leave it out rather than guess.
+Use simple, everyday language a common person can easily understand — avoid formal or academic wording throughout."""
+
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "maxOutputTokens": 700,
+            "responseMimeType": "application/json",
+            "responseSchema": ENRICH_SCHEMA,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        result = json.loads(resp.read().decode())
+    try:
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(raw_text)
+    except (KeyError, IndexError, json.JSONDecodeError):
+        return None
+
+
+def check_moderator_password(provided):
+    real_password = os.environ.get("SCAM_MODERATOR_PASSWORD")
+    if not real_password:
+        return False
+    return provided == real_password
+
+
+@app.route('/api/scam-moderate', methods=['POST'])
+def scam_moderate():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        password = body.get("password", "")
+        action = body.get("action")
+
+        if not check_moderator_password(password):
+            return jsonify({"ok": False, "error": "Incorrect or unset moderator password."}), 401
+
+        if action == "list":
+            try:
+                pending, _ = github_get(PENDING_FILE, site_token)
+                if pending is None:
+                    pending = {"entries": []}
+            except Exception:
+                pending = {"entries": []}
+            items = [e for e in pending.get("entries", []) if e.get("status") == "pending"]
+            return jsonify({"ok": True, "items": items})
+
+        if action == "list_published":
+            try:
+                public_data, _ = github_get(PUBLIC_FILE, site_token)
+                if public_data is None:
+                    public_data = {"entries": []}
+            except Exception:
+                public_data = {"entries": []}
+            return jsonify({"ok": True, "items": public_data.get("entries", [])})
+
+        if action == "list_archived":
+            try:
+                archive, _ = github_get(ARCHIVE_FILE, site_token)
+                if archive is None:
+                    archive = {"entries": []}
+            except Exception:
+                archive = {"entries": []}
+            return jsonify({"ok": True, "items": archive.get("entries", [])})
+
+        report_id = body.get("id")
+        if not report_id:
+            return jsonify({"ok": False, "error": "No report id provided."}), 400
+
+        if action == "takedown":
+            public_data, public_sha = github_get(PUBLIC_FILE, site_token)
+            entry = None
+            remaining = []
+            for e in (public_data or {}).get("entries", []):
+                if e.get("id") == report_id:
+                    entry = e
+                else:
+                    remaining.append(e)
+            if not entry:
+                return jsonify({"ok": False, "error": "Published story not found."}), 404
+            entry["taken_down_at"] = datetime.now(timezone.utc).isoformat()
+            public_data["entries"] = remaining
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Take down scam story")
+
+            try:
+                archive, archive_sha = github_get(ARCHIVE_FILE, site_token)
+                if archive is None:
+                    archive = {"entries": []}
+            except Exception:
+                archive, archive_sha = {"entries": []}, None
+            archive.setdefault("entries", []).append(entry)
+            github_put(ARCHIVE_FILE, site_token, archive, archive_sha, "Archive taken-down scam story")
+            return jsonify({"ok": True})
+
+        if action == "restore":
+            archive, archive_sha = github_get(ARCHIVE_FILE, site_token)
+            entry = None
+            remaining = []
+            for e in (archive or {}).get("entries", []):
+                if e.get("id") == report_id:
+                    entry = e
+                else:
+                    remaining.append(e)
+            if not entry:
+                return jsonify({"ok": False, "error": "Archived story not found."}), 404
+            entry.pop("taken_down_at", None)
+            archive["entries"] = remaining
+            github_put(ARCHIVE_FILE, site_token, archive, archive_sha, "Restore scam story from archive")
+
+            try:
+                public_data, public_sha = github_get(PUBLIC_FILE, site_token)
+                if public_data is None:
+                    public_data = {"entries": []}
+            except Exception:
+                public_data, public_sha = {"entries": []}, None
+            public_data.setdefault("entries", []).append(entry)
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Restore scam story to public")
+            return jsonify({"ok": True})
+
+        pending, pending_sha = github_get(PENDING_FILE, site_token)
+        target = None
+        for e in (pending or {}).get("entries", []):
+            if e.get("id") == report_id:
+                target = e
+                break
+        if not target:
+            return jsonify({"ok": False, "error": "Report not found."}), 404
+
+        if action == "approve":
+            gemini_key = os.environ.get("GEMINI_API_KEY")
+            enrichment = None
+            if gemini_key:
+                try:
+                    enrichment = call_gemini_enrichment(gemini_key, target["category"], target["anonymized_story"], target.get("lang", "en"))
+                except Exception:
+                    enrichment = None
+
+            try:
+                public_data, public_sha = github_get(PUBLIC_FILE, site_token)
+                if public_data is None:
+                    public_data = {"entries": []}
+            except Exception:
+                public_data, public_sha = {"entries": []}, None
+            src_fields = target.get("structured_fields", {})
+            public_entry = {
+                "id": target["id"],
+                "ref_number": target.get("ref_number", ""),
+                "category": target["category"],
+                "title": target["title"],
+                "anonymized_story": target["anonymized_story"],
+                "signals": {
+                    "contact_method": src_fields.get("contact_method", ""),
+                    "ask_action": src_fields.get("ask_action", ""),
+                    "cost_items": src_fields.get("cost_items", []),
+                    "money_range": src_fields.get("money_range", ""),
+                },
+                "lang": target.get("lang", "en"),
+                "status": "approved",
+                "submitted_at": target.get("submitted_at", ""),
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if enrichment:
+                public_entry["enrichment"] = enrichment
+            public_data.setdefault("entries", []).append(public_entry)
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Approve scam report")
+            target["status"] = "approved"
+
+        elif action == "reject":
+            target["status"] = "rejected"
+
+        else:
+            return jsonify({"ok": False, "error": "Unknown action."}), 400
+
+        github_put(PENDING_FILE, site_token, pending, pending_sha, f"Scam report {action}")
+        return jsonify({"ok": True})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
 # Health check — visit this URL directly in your phone's browser to confirm
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({"ok": True, "service": "lawsticker-backend-batch1", "routes": [
+    return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
-        "/api/site-activity-digest", "/api/site-watchers"
+        "/api/site-activity-digest", "/api/site-watchers",
+        "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate"
     ]})
 
 
