@@ -1444,6 +1444,89 @@ def news_digest_i18n():
 
 
 # ---------------------------------------------------------------------------
+# 11. Daily Quiz Generator — cron-triggered ONCE PER DAY only.
+# This never runs on a page visit — the homepage just reads the cached
+# daily-quiz.json file, exactly like it already reads news-feed.json.
+# One Gemini call per day, total, regardless of how many people visit.
+# ---------------------------------------------------------------------------
+
+QUIZ_FILE = "daily-quiz.json"
+QUIZ_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string", "description": "A genuinely interesting question testing real understanding, not trivia"},
+        "options": {"type": "array", "items": {"type": "string"}, "description": "Exactly 4 answer options"},
+        "correct_index": {"type": "integer", "description": "Index (0-3) of the correct option"},
+        "explanation": {"type": "string", "description": "2-3 sentences explaining the correct answer, grounded only in the provided content"},
+        "source_page": {"type": "string", "description": "Which source_page this question was grounded in"},
+    },
+    "required": ["question", "options", "correct_index", "explanation", "source_page"],
+}
+
+
+def build_quiz_prompt(entries):
+    import random
+    sample = random.sample(entries, min(6, len(entries)))
+    context_blocks = []
+    for e in sample:
+        title = e["title"].get("en", "")
+        body = e["body"].get("en", "")
+        context_blocks.append(f"[Source: {e['source_page']}]\nTitle: {title}\nContent: {body}")
+    context = "\n\n".join(context_blocks)
+
+    return f"""You are writing today's quiz question for LawSticker AI's homepage — something that makes someone stop scrolling and think "wait, really?"
+
+Pick ONE of the topics below and write a genuinely interesting multiple-choice question testing real understanding of it — not a trivial date/number lookup, something that reveals a fact people commonly get wrong or don't know.
+
+AVAILABLE CONTENT:
+{context}
+
+Requirements:
+- question: engaging, specific, makes someone want to know the answer
+- options: exactly 4 plausible options, only one correct
+- correct_index: 0-3
+- explanation: why the correct answer is right, using ONLY the content above — never invent a fact not stated there
+- source_page: which [Source: ...] tag the question came from
+
+Stay strictly grounded in the provided content — if you're not confident the content clearly supports a specific answer, pick a different, simpler angle rather than guess."""
+
+
+@app.route('/api/daily-quiz', methods=['GET'])
+def daily_quiz():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        kb, _ = github_get(KB_FILE, site_token, timeout=5)
+        entries = (kb or {}).get("entries", [])
+        if not entries:
+            return jsonify({"ok": False, "error": "Knowledge base is empty."}), 500
+
+        prompt = build_quiz_prompt(entries)
+        quiz = call_gemini_structured(gemini_key, prompt, QUIZ_SCHEMA, max_tokens=500)
+        if not quiz or len(quiz.get("options", [])) != 4:
+            return jsonify({"ok": False, "error": "AI returned an unexpected quiz format."}), 500
+
+        try:
+            existing, sha = github_get(QUIZ_FILE, site_token, timeout=5)
+        except Exception:
+            existing, sha = None, None
+
+        output = {
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "quiz": quiz,
+        }
+        github_put(QUIZ_FILE, site_token, output, sha, "Daily quiz generated", timeout=8)
+        return jsonify({"ok": True, "quiz": quiz})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Health check — visit this URL directly in your phone's browser to confirm
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
@@ -1454,7 +1537,7 @@ def health():
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
         "/api/site-activity-digest", "/api/site-watchers",
         "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate",
-        "/api/daily-digest", "/api/news-digest-i18n"
+        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz"
     ]})
 
 
