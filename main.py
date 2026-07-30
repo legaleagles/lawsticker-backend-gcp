@@ -567,7 +567,7 @@ def call_gemini_structured(api_key, prompt, schema):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=6) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read().decode())
     raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw_text)
@@ -696,7 +696,7 @@ def call_gemini_askai(api_key, prompt, image_base64=None, image_mime_type=None):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=8) as resp:
+    with urllib.request.urlopen(req, timeout=20) as resp:
         result = json.loads(resp.read().decode())
     try:
         return result["candidates"][0]["content"]["parts"][0]["text"]
@@ -728,7 +728,7 @@ def ask_ai():
 
         if topic == "scam_verify" and question:
             try:
-                public_data, _ = github_get(PUBLIC_SCAM_FILE, site_token, timeout=1.5)
+                public_data, _ = github_get(PUBLIC_SCAM_FILE, site_token, timeout=5)
                 scam_entries = (public_data or {}).get("entries", [])
             except Exception:
                 scam_entries = []
@@ -749,7 +749,7 @@ def ask_ai():
 
             return jsonify({"ok": True, "result_type": "scam_verify", "result": verify_result})
 
-        kb, _ = github_get(KB_FILE, site_token, timeout=1.5)
+        kb, _ = github_get(KB_FILE, site_token, timeout=5)
         entries = (kb or {}).get("entries", [])
 
         if image_base64:
@@ -879,7 +879,7 @@ def scam_ed():
         if not story:
             return jsonify({"ok": False, "error": "No details provided."}), 400
 
-        kb, _ = github_get(KB_FILE, site_token, timeout=2)
+        kb, _ = github_get(KB_FILE, site_token, timeout=5)
         entries = (kb or {}).get("entries", [])
         relevant_entries = filter_relevant_entries_scamed(story, entries)
         prompt = build_scamed_prompt(story, relevant_entries, lang)
@@ -898,7 +898,7 @@ def scam_ed():
         internal_id = f"scam-{int(datetime.now(timezone.utc).timestamp())}"
         ref_number = "SE-" + internal_id.split("-")[1][-6:]
         try:
-            pending, sha = github_get(PENDING_FILE, site_token, timeout=2.5)
+            pending, sha = github_get(PENDING_FILE, site_token, timeout=6)
             if pending is None:
                 pending = {"entries": []}
         except Exception:
@@ -916,7 +916,7 @@ def scam_ed():
             "status": "pending",
         })
         pending["entries"] = pending["entries"][-500:]
-        github_put(PENDING_FILE, site_token, pending, sha, "New scam submission pending review", timeout=2.5)
+        github_put(PENDING_FILE, site_token, pending, sha, "New scam submission pending review", timeout=8)
 
         bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -1012,7 +1012,7 @@ Use simple, everyday language a common person can easily understand — avoid fo
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=6) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read().decode())
     try:
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
