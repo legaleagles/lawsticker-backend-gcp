@@ -16,10 +16,13 @@ import os
 import re
 import base64
 import hashlib
+import io
+import textwrap
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timezone
+from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 CORS(app, origins=["https://lawsticker-ai.com"])
@@ -116,6 +119,31 @@ def answer_callback_query(bot_token, callback_query_id, text=""):
     payload = json.dumps({"callback_query_id": callback_query_id, "text": text}).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+
+def send_telegram_photo(bot_token, chat_id, image_bytes, caption=""):
+    # Telegram's sendPhoto needs multipart/form-data, not JSON like every
+    # other call here — building the multipart body by hand to avoid
+    # pulling in a new dependency just for this one upload.
+    boundary = "----LawStickerCardBoundary"
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+
+    parts = []
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode())
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n".encode())
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"parse_mode\"\r\n\r\nHTML\r\n".encode())
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"card.png\"\r\nContent-Type: image/png\r\n\r\n".encode())
+    parts.append(image_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -1632,7 +1660,146 @@ def daily_quiz():
 
 
 # ---------------------------------------------------------------------------
-# Health check — visit this URL directly in your phone's browser to confirm
+# 12. Daily Social Card — cron-triggered ONCE PER DAY only, same discipline
+# as the quiz. Gemini writes a genuinely curiosity-driving hook grounded in
+# a real, verified fact (never a false claim — "clickbait framing, honest
+# content" is the deliberate line). PIL renders it onto a branded vertical
+# card. Delivered to Telegram as a photo, ready to forward to WhatsApp
+# Status, Instagram, wherever — no direct posting, human stays in the loop.
+# ---------------------------------------------------------------------------
+
+SOCIAL_CARD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "hook": {"type": "string", "description": "A short, genuinely curiosity-driving headline (under 60 characters) — makes someone stop scrolling. Must be a real, true claim, never exaggerated or misleading."},
+        "subtext": {"type": "string", "description": "1-2 sentences of real explanation, grounded only in the provided content"},
+        "source_page": {"type": "string", "description": "Which [Source: ...] tag this was grounded in"},
+    },
+    "required": ["hook", "subtext", "source_page"],
+}
+
+
+def build_social_card_prompt(entries):
+    import random
+    sample = random.sample(entries, min(6, len(entries)))
+    context_blocks = []
+    for e in sample:
+        title = e["title"].get("en", "")
+        body = e["body"].get("en", "")
+        context_blocks.append(f"[Source: {e['source_page']}]\nTitle: {title}\nContent: {body}")
+    context = "\n\n".join(context_blocks)
+
+    return f"""You are writing today's social media card for LawSticker AI — something genuinely scroll-stopping that makes someone go "wait, really?" and want to know more.
+
+AVAILABLE CONTENT:
+{context}
+
+Pick ONE genuinely surprising angle and write:
+- hook: under 60 characters, punchy, creates real curiosity — but every word must be something the content below actually supports. Curiosity in FRAMING is the goal; never curiosity through exaggeration or a misleading implication.
+- subtext: 1-2 sentences of real explanation, grounded only in the content above
+- source_page: which [Source: ...] tag this came from
+
+The test: if someone fact-checked this hook against the actual content, it should hold up completely. Surprising and true, not surprising because it's stretched."""
+
+
+def wrap_and_draw(draw, text, font, x, y, max_width_px, fill, line_height):
+    # Wraps text to fit a pixel width rather than a fixed character count,
+    # since headline lengths vary a lot — a naive fixed-width wrap either
+    # overflows on wide characters or wastes space on narrow ones.
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if draw.textlength(test, font=font) <= max_width_px:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    for line in lines:
+        draw.text((x, y), line, font=font, fill=fill)
+        y += line_height
+    return y
+
+
+def render_social_card(hook, subtext):
+    W, H = 1080, 1920
+    img = Image.new('RGB', (W, H), '#0D1117')
+    draw = ImageDraw.Draw(img)
+
+    for y in range(H):
+        t = y / H
+        r = int(0x0D + (0x1a - 0x0D) * t)
+        g = int(0x11 + (0x20 - 0x11) * t)
+        b = int(0x17 + (0x36 - 0x17) * t)
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+    font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    bold_72 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 72)
+    bold_32 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 32)
+    reg_40 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Regular.ttf"), 40)
+
+    draw.rounded_rectangle([(80, 140), (560, 210)], radius=35, fill='#C9A227')
+    draw.text((110, 155), "DID YOU KNOW?", font=bold_32, fill='#0D1117')
+
+    y = wrap_and_draw(draw, hook, bold_72, 80, 320, W - 160, '#FFFFFF', 90)
+    y = wrap_and_draw(draw, subtext, reg_40, 80, y + 40, W - 160, '#D1D5DB', 52)
+
+    draw.rounded_rectangle([(80, H - 280), (W - 80, H - 190)], radius=20, outline='#F5D76E', width=3)
+    draw.text((130, H - 260), "Full story on our website →", font=bold_32, fill='#F5D76E')
+
+    draw.text((80, H - 120), "LawSticker AI", font=bold_72.font_variant(size=48), fill='#C9A227')
+    draw.text((80, H - 70), "lawsticker-ai.com", font=reg_40.font_variant(size=30), fill='#9CA3AF')
+
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return buf.getvalue()
+
+
+@app.route('/api/daily-social-card', methods=['GET'])
+def daily_social_card():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not site_token or not gemini_key or not bot_token or not chat_id:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        kb, _ = github_get(KB_FILE, site_token, timeout=5)
+        entries = (kb or {}).get("entries", [])
+        if not entries:
+            return jsonify({"ok": False, "error": "Knowledge base is empty."}), 500
+
+        prompt = build_social_card_prompt(entries)
+        card_data = call_gemini_structured(gemini_key, prompt, SOCIAL_CARD_SCHEMA, max_tokens=300)
+        if not card_data or not card_data.get("hook"):
+            return jsonify({"ok": False, "error": "AI returned an unexpected format."}), 500
+
+        image_bytes = render_social_card(card_data["hook"], card_data["subtext"])
+
+        caption = (
+            f"📲 <b>Today's shareable card</b>\n\n"
+            f"Forward this to your WhatsApp Status, Instagram, or wherever — "
+            f"ready as-is.\n\n"
+            f"Source: lawsticker-ai.com/{card_data.get('source_page', '')}.html"
+        )
+        results = {}
+        for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+            try:
+                send_telegram_photo(bot_token, cid, image_bytes, caption)
+                results[cid] = "sent"
+            except Exception as e:
+                results[cid] = f"failed: {e}"
+
+        return jsonify({"ok": True, "card": card_data, "telegram_results": results})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
 
@@ -1642,7 +1809,7 @@ def health():
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
         "/api/site-activity-digest", "/api/site-watchers",
         "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate",
-        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz", "/api/telegram-webhook"
+        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz", "/api/telegram-webhook", "/api/daily-social-card"
     ]})
 
 
