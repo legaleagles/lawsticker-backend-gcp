@@ -506,17 +506,27 @@ SCAM_VERIFY_SCHEMA = {
     "type": "object",
     "properties": {
         "risk_level": {"type": "string", "enum": SCAM_VERIFY_RISK_LEVELS},
+        "scam_type_label": {"type": "string", "description": "If this resembles a known scam pattern type (even loosely), name it (e.g. 'Pyramid Scheme / MLM Fraud', 'Phishing / OTP Scam'). Empty string if genuinely nothing recognizable."},
         "red_flags_found": {"type": "array", "items": {"type": "string"}, "description": "Specific warning signs identified in THIS situation, empty array if none"},
+        "how_this_typically_works": {"type": "string", "description": "2-3 sentences of genuine educational context on how this type of scam generally operates — even if this specific case isn't a confirmed match, this helps the user recognize the pattern"},
         "matches_known_pattern": {"type": "boolean", "description": "True only if this genuinely resembles a pattern in the provided reported cases"},
         "matched_category": {"type": "string", "description": "Which category it resembles, empty string if matches_known_pattern is false"},
-        "reasoning": {"type": "string", "description": "2-3 sentences explaining the assessment, plain and simple language"},
-        "advice": {"type": "string", "description": "Practical next steps — what to check or do, plain simple language"},
+        "relevant_laws": {"type": "array", "items": {"type": "string"}, "description": "Names of well-established Indian Acts/laws relevant to this scam type, if genuinely applicable — ONLY Act names, never case citations. Empty array if not confident."},
+        "verification_steps": {"type": "array", "items": {"type": "string"}, "description": "3-5 concrete, specific things the user can independently verify — not generic advice, actual actions (e.g. 'call the company's official number listed on their verified website, not the number given to you')"},
+        "who_to_contact": {"type": "array", "items": {"type": "string"}, "description": "Specific, relevant helplines or authorities for THIS situation — only include ones that are genuinely relevant, not a boilerplate list every time"},
+        "reasoning": {"type": "string", "description": "2-3 sentences explaining the overall assessment, plain and simple language"},
     },
-    "required": ["risk_level", "red_flags_found", "matches_known_pattern", "matched_category", "reasoning", "advice"],
+    "required": ["risk_level", "scam_type_label", "red_flags_found", "how_this_typically_works", "matches_known_pattern", "matched_category", "relevant_laws", "verification_steps", "who_to_contact", "reasoning"],
 }
 
 
-def summarize_known_scam_patterns(entries, max_entries=20):
+def summarize_known_scam_patterns(entries, max_entries=50):
+    # Feeding richer context per entry (red flags, relevant laws already
+    # generated at approval time) gives Gemini genuinely better grounding
+    # to cross-reference against, not just a bare category label. The
+    # corpus is still small enough that feeding up to 50 entries (rather
+    # than the previous 20) costs very little extra and covers the whole
+    # database in practice.
     lines = []
     for e in entries[-max_entries:]:
         enrichment = e.get("enrichment", {})
@@ -528,36 +538,41 @@ def summarize_known_scam_patterns(entries, max_entries=20):
             line += f" | Contact: {signals['contact_method']}"
         if signals.get("ask_action"):
             line += f" | Asked for: {signals['ask_action']}"
+        if enrichment.get("red_flags"):
+            line += f" | Known red flags: {'; '.join(enrichment['red_flags'][:3])}"
         lines.append(line)
     return "\n".join(lines) if lines else "No reported cases in the database yet."
 
 
 def build_scam_verify_prompt(situation, known_patterns_summary, lang):
     lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
-    return f"""You are Durga Bro, checking whether a described situation shows signs of being a scam.
+    return f"""You are Durga Bro, doing a genuinely thorough check on whether a described situation shows signs of being a scam — this should be a real, substantive analysis, not a quick surface-level check.
 
-REPORTED PATTERNS FROM OUR COMMUNITY DATABASE (real, anonymized cases):
+REPORTED PATTERNS FROM OUR COMMUNITY DATABASE (real, anonymized cases, with known red flags where available):
 {known_patterns_summary}
 
 USER'S SITUATION:
 {situation}
 
-Analyze honestly and produce, in {lang_names.get(lang, "English")}:
+Analyze thoroughly and produce, in {lang_names.get(lang, "English")}:
 - risk_level: your genuine, calibrated assessment. Do NOT default to "High Concern" just to be safe — only use it when the situation clearly shows real warning signs. Use "Not Enough Information" honestly when the description is too vague to judge.
-- red_flags_found: concrete warning signs actually present in what they described — do not invent flags that aren't there
-- matches_known_pattern: true ONLY if this situation genuinely resembles one of the reported patterns above — do not force a match
-- matched_category: which category, only if matches_known_pattern is true
-- reasoning: explain your assessment plainly — why you landed on this risk level
-- advice: practical next steps in simple language — what to verify, who to contact if genuinely worried (mention Cybercrime Helpline 1930 or NALSA 15100 only if genuinely relevant)
+- scam_type_label: if this resembles a recognizable scam pattern (even a well-known general type, not just from the database above), name it plainly. Leave empty if genuinely nothing recognizable.
+- red_flags_found: concrete warning signs actually present in what they described — do not invent flags that aren't there.
+- how_this_typically_works: genuine educational context on how this type of scam generally operates — this should teach the user something real about the pattern, whether or not this specific case is confirmed.
+- matches_known_pattern / matched_category: true only if this situation genuinely resembles one of the database patterns above — do not force a match.
+- relevant_laws: name well-established Indian Acts relevant to this situation (e.g. Consumer Protection Act 2019, IT Act 2000, Prize Chits and Money Circulation Schemes Banning Act 1978) — ONLY if you're genuinely confident, never invent or guess. Leave empty rather than force one.
+- verification_steps: give SPECIFIC, actionable things to check — not "be careful," but concrete verification actions tailored to this situation.
+- who_to_contact: only list helplines/authorities that are genuinely relevant to this specific situation — don't pad with a generic list every time. Cybercrime Helpline 1930 and NALSA legal aid 15100 are real national resources, use them where genuinely applicable.
+- reasoning: explain the overall assessment plainly.
 
-Be honest and calibrated — false alarms erode trust just as much as missed warnings. If this looks like a completely normal, legitimate interaction, say so plainly rather than manufacturing concern."""
+Be honest and calibrated — false alarms erode trust just as much as missed warnings. If this looks like a completely normal, legitimate interaction, say so plainly rather than manufacturing concern. Give this a real, thoughtful analysis — you have room to be genuinely thorough here, not just a one-line reaction."""
 
 
-def call_gemini_structured(api_key, prompt, schema):
+def call_gemini_structured(api_key, prompt, schema, max_tokens=600):
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "maxOutputTokens": 600,
+            "maxOutputTokens": max_tokens,
             "responseMimeType": "application/json",
             "responseSchema": schema,
         },
@@ -736,7 +751,7 @@ def ask_ai():
             known_patterns_summary = summarize_known_scam_patterns(scam_entries)
             verify_prompt = build_scam_verify_prompt(question, known_patterns_summary, lang)
             try:
-                verify_result = call_gemini_structured(gemini_key, verify_prompt, SCAM_VERIFY_SCHEMA)
+                verify_result = call_gemini_structured(gemini_key, verify_prompt, SCAM_VERIFY_SCHEMA, max_tokens=1200)
             except urllib.error.HTTPError as e:
                 error_body = e.read().decode()
                 if e.code == 429:
