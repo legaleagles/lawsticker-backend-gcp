@@ -486,6 +486,7 @@ TOPIC_PAGE_MAP = {
     "health": ["rights-health"], "digital": ["rights-digital"], "farmer": ["rights-farmer"],
     "personal": ["rights-personal"], "student": ["rights-student"],
     "tax": ["rights-tax"],
+    "cinema": ["rights-cinema"],
     "lawcet": ["lawcet"],
     "llbsubjects": ["subjects"],
     "calculators": ["limitation-calc", "court-fee-calc", "chit-fund-calc", "electricity-calc",
@@ -495,7 +496,7 @@ TOPIC_PAGE_MAP = {
 TOPIC_LABELS = {
     "consumer": "Consumer Rights", "property": "Property Rights", "family": "Family Rights",
     "health": "Health Rights", "digital": "Digital Rights", "farmer": "Farmer Rights",
-    "personal": "Personal Rights", "student": "Student Rights", "tax": "Income Tax Basics",
+    "personal": "Personal Rights", "student": "Student Rights", "tax": "Income Tax Basics", "cinema": "Cinema Rights",
     "lawcet": "LAWCET Counselling", "calculators": "Site Calculators", "llbsubjects": "LLB Subjects",
     "scam_verify": "Check a Scam",
 }
