@@ -82,6 +82,43 @@ def send_telegram_to_all(bot_token, chat_id_config, text):
     return results
 
 
+def send_telegram_with_buttons(bot_token, chat_id, text, report_id):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"approve:{report_id}"},
+                {"text": "❌ Reject", "callback_data": f"reject:{report_id}"},
+            ]]
+        },
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def edit_telegram_message(bot_token, chat_id, message_id, text):
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+    payload = json.dumps({
+        "chat_id": chat_id, "message_id": message_id, "text": text,
+        "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []},
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def answer_callback_query(bot_token, callback_query_id, text=""):
+    url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+    payload = json.dumps({"callback_query_id": callback_query_id, "text": text}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+
 # ---------------------------------------------------------------------------
 # 1. Wall of Fame
 # ---------------------------------------------------------------------------
@@ -941,11 +978,20 @@ def scam_ed():
             try:
                 alert_text = (
                     f"🛡️ <b>New Scam-Ed Report</b> ({ref_number})\n"
-                    f"Category: {parsed['category']}\n"
-                    f"Title: {parsed['title']}\n"
-                    f"Review at: lawsticker-ai.com/scam-ed-moderate.html"
+                    f"Category: {parsed['category']}\n\n"
+                    f"<b>Raw submission (private, not yet public):</b>\n{story[:1500]}\n\n"
+                    f"<b>AI-generated title:</b> {parsed['title']}\n"
+                    f"<b>AI-generated anonymized version:</b>\n{parsed['anonymized_story'][:800]}\n\n"
+                    f"Tap below to approve or reject directly. For takedown/restore, use the moderator page."
                 )
-                send_telegram_to_all(bot_token, chat_id, alert_text)
+                # Send to each configured chat with buttons attached — the
+                # callback later tells us exactly which chat and message
+                # to edit, and which Telegram user tapped it.
+                for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+                    try:
+                        send_telegram_with_buttons(bot_token, cid, alert_text, internal_id)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -1045,6 +1091,71 @@ def check_moderator_password(provided):
     return provided == real_password
 
 
+def process_scam_decision(report_id, action, site_token):
+    # Shared by the web moderator page and the Telegram inline-button
+    # webhook — one true implementation of approve/reject, so both entry
+    # points can never drift apart or duplicate the double-click-race fix.
+    if action not in ("approve", "reject"):
+        return {"ok": False, "error": "Unknown action.", "_status": 400}
+
+    pending, pending_sha = github_get(PENDING_FILE, site_token)
+    target = None
+    for e in (pending or {}).get("entries", []):
+        if e.get("id") == report_id:
+            target = e
+            break
+    if not target:
+        return {"ok": False, "error": "Report not found.", "_status": 404}
+
+    if target.get("status") != "pending":
+        return {"ok": False, "error": f"Already {target.get('status')} — refresh to see current state.", "_status": 409}
+
+    if action == "approve":
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        enrichment = None
+        if gemini_key:
+            try:
+                enrichment = call_gemini_enrichment(gemini_key, target["category"], target["anonymized_story"], target.get("lang", "en"))
+            except Exception:
+                enrichment = None
+
+        try:
+            public_data, public_sha = github_get(PUBLIC_FILE, site_token)
+            if public_data is None:
+                public_data = {"entries": []}
+        except Exception:
+            public_data, public_sha = {"entries": []}, None
+        src_fields = target.get("structured_fields", {})
+        public_entry = {
+            "id": target["id"],
+            "ref_number": target.get("ref_number", ""),
+            "category": target["category"],
+            "title": target["title"],
+            "anonymized_story": target["anonymized_story"],
+            "signals": {
+                "contact_method": src_fields.get("contact_method", ""),
+                "ask_action": src_fields.get("ask_action", ""),
+                "cost_items": src_fields.get("cost_items", []),
+                "money_range": src_fields.get("money_range", ""),
+            },
+            "lang": target.get("lang", "en"),
+            "status": "approved",
+            "submitted_at": target.get("submitted_at", ""),
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if enrichment:
+            public_entry["enrichment"] = enrichment
+        public_data.setdefault("entries", []).append(public_entry)
+        github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Approve scam report")
+        target["status"] = "approved"
+
+    else:
+        target["status"] = "rejected"
+
+    github_put(PENDING_FILE, site_token, pending, pending_sha, f"Scam report {action}")
+    return {"ok": True}
+
+
 @app.route('/api/scam-moderate', methods=['POST'])
 def scam_moderate():
     site_token = os.environ.get("SITE_REPO_TOKEN")
@@ -1141,68 +1252,62 @@ def scam_moderate():
             github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Restore scam story to public")
             return jsonify({"ok": True})
 
-        pending, pending_sha = github_get(PENDING_FILE, site_token)
-        target = None
-        for e in (pending or {}).get("entries", []):
-            if e.get("id") == report_id:
-                target = e
-                break
-        if not target:
-            return jsonify({"ok": False, "error": "Report not found."}), 404
+        result = process_scam_decision(report_id, action, site_token)
+        return jsonify(result), (200 if result.get("ok") else result.get("_status", 400))
 
-        if target.get("status") != "pending" and action in ("approve", "reject"):
-            # Guards against exactly the double-click race that created
-            # duplicate public entries — a report already actioned once
-            # must never be processed again, regardless of what the
-            # frontend does or doesn't prevent.
-            return jsonify({"ok": False, "error": f"Already {target.get('status')} — refresh to see current state."}), 409
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-        if action == "approve":
-            gemini_key = os.environ.get("GEMINI_API_KEY")
-            enrichment = None
-            if gemini_key:
-                try:
-                    enrichment = call_gemini_enrichment(gemini_key, target["category"], target["anonymized_story"], target.get("lang", "en"))
-                except Exception:
-                    enrichment = None
 
+@app.route('/api/telegram-webhook', methods=['POST'])
+def telegram_webhook():
+    # Telegram calls this automatically whenever someone taps an inline
+    # button on a message this bot sent. Restricted to the configured
+    # channel(s) only — anyone else tapping (which shouldn't be possible
+    # in a closed channel, but checked anyway) is silently ignored.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    allowed_chat_ids = {c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()}
+
+    try:
+        update = request.get_json(force=True, silent=True) or {}
+        cq = update.get("callback_query")
+        if not cq:
+            return jsonify({"ok": True})  # not a button tap — nothing to do, still 200 so Telegram doesn't retry
+
+        chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+        message_id = cq.get("message", {}).get("message_id")
+        callback_id = cq.get("id")
+        data = cq.get("data", "")
+
+        if chat_id not in allowed_chat_ids:
+            if bot_token and callback_id:
+                answer_callback_query(bot_token, callback_id, "Not authorized.")
+            return jsonify({"ok": True})
+
+        if ":" not in data:
+            return jsonify({"ok": True})
+        action, report_id = data.split(":", 1)
+
+        result = process_scam_decision(report_id, action, site_token)
+
+        if bot_token and callback_id:
+            feedback = "✅ Approved" if (result.get("ok") and action == "approve") else \
+                       "❌ Rejected" if (result.get("ok") and action == "reject") else \
+                       result.get("error", "Failed")
             try:
-                public_data, public_sha = github_get(PUBLIC_FILE, site_token)
-                if public_data is None:
-                    public_data = {"entries": []}
+                answer_callback_query(bot_token, callback_id, feedback)
             except Exception:
-                public_data, public_sha = {"entries": []}, None
-            src_fields = target.get("structured_fields", {})
-            public_entry = {
-                "id": target["id"],
-                "ref_number": target.get("ref_number", ""),
-                "category": target["category"],
-                "title": target["title"],
-                "anonymized_story": target["anonymized_story"],
-                "signals": {
-                    "contact_method": src_fields.get("contact_method", ""),
-                    "ask_action": src_fields.get("ask_action", ""),
-                    "cost_items": src_fields.get("cost_items", []),
-                    "money_range": src_fields.get("money_range", ""),
-                },
-                "lang": target.get("lang", "en"),
-                "status": "approved",
-                "submitted_at": target.get("submitted_at", ""),
-                "approved_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if enrichment:
-                public_entry["enrichment"] = enrichment
-            public_data.setdefault("entries", []).append(public_entry)
-            github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Approve scam report")
-            target["status"] = "approved"
+                pass
+            if result.get("ok") and message_id:
+                try:
+                    original_text = cq.get("message", {}).get("text", "")
+                    tapper = cq.get("from", {}).get("first_name", "someone")
+                    edit_telegram_message(bot_token, chat_id, message_id,
+                                           original_text + f"\n\n— {feedback} by {tapper}")
+                except Exception:
+                    pass
 
-        elif action == "reject":
-            target["status"] = "rejected"
-
-        else:
-            return jsonify({"ok": False, "error": "Unknown action."}), 400
-
-        github_put(PENDING_FILE, site_token, pending, pending_sha, f"Scam report {action}")
         return jsonify({"ok": True})
 
     except Exception as e:
@@ -1537,7 +1642,7 @@ def health():
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
         "/api/site-activity-digest", "/api/site-watchers",
         "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate",
-        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz"
+        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz", "/api/telegram-webhook"
     ]})
 
 
