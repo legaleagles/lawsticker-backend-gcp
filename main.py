@@ -1133,6 +1133,13 @@ def scam_moderate():
         if not target:
             return jsonify({"ok": False, "error": "Report not found."}), 404
 
+        if target.get("status") != "pending" and action in ("approve", "reject"):
+            # Guards against exactly the double-click race that created
+            # duplicate public entries — a report already actioned once
+            # must never be processed again, regardless of what the
+            # frontend does or doesn't prevent.
+            return jsonify({"ok": False, "error": f"Already {target.get('status')} — refresh to see current state."}), 409
+
         if action == "approve":
             gemini_key = os.environ.get("GEMINI_API_KEY")
             enrichment = None
