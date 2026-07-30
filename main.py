@@ -1194,6 +1194,239 @@ def scam_moderate():
 
 
 # ---------------------------------------------------------------------------
+# 9. Daily Digest — petrol/diesel/gold/silver + top headlines to Telegram
+# ---------------------------------------------------------------------------
+
+DAILYDIGEST_CONFIG_FILE = "site-config.json"
+DAILYDIGEST_STATE_FILE = "daily-digest-state.json"
+PETROL_URL = "https://www.goodreturns.in/petrol-price-in-hyderabad.html"
+DIESEL_URL = "https://www.goodreturns.in/diesel-price-in-hyderabad.html"
+
+
+def fetch_text_digest(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; LawStickerDigest/1.0)"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+    html = re.sub(r"<script.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<style.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = text.replace("&#8377;", "₹").replace("&#x20b9;", "₹").replace("&rupee;", "₹")
+    text = re.sub(r"&nbsp;|&amp;|&quot;", " ", text)
+    text = re.sub(r"&#\d+;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def extract_fuel_price(text, fuel_word):
+    patterns = [
+        rf"{fuel_word} price in Hyderabad (?:is at|stands at) (?:₹|Rs\.?)\s*([\d.]+)",
+        rf"{fuel_word} price.{{0,30}}?Hyderabad.{{0,30}}?(?:₹|Rs\.?)\s*([\d.]+)",
+        rf"(?:₹|Rs\.?)\s*([\d.]+)\s*per litre",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def arrow_digest(current, previous):
+    if previous is None:
+        return ""
+    diff = round(current - previous, 2)
+    if diff > 0:
+        return f" 🔺 +₹{diff}"
+    elif diff < 0:
+        return f" 🔻 -₹{abs(diff)}"
+    return " ➖ no change"
+
+
+def escape_html_digest(text):
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_digest_message(petrol, diesel, gold, silver, prev, news_categories):
+    today = datetime.now(timezone.utc).strftime("%d %B %Y")
+    lines = []
+    lines.append(f"📊 <b>Today's Rates — {today}</b>")
+    lines.append("")
+    lines.append(f"⛽ <b>Petrol</b> (Hyderabad): ₹{petrol}/L{arrow_digest(petrol, prev.get('petrol'))}")
+    lines.append(f"🛢️ <b>Diesel</b> (Hyderabad): ₹{diesel}/L{arrow_digest(diesel, prev.get('diesel'))}")
+    lines.append("")
+    lines.append(f"🥇 <b>Gold</b> (24K): ₹{gold}/gram{arrow_digest(gold, prev.get('gold'))}")
+    lines.append(f"🥈 <b>Silver</b> (999): ₹{silver}/gram{arrow_digest(silver, prev.get('silver'))}")
+
+    news_labels = [
+        ("legal", "⚖️ Legal"),
+        ("regional", "📍 Regional"),
+        ("national", "🇮🇳 National"),
+        ("international", "🌍 World"),
+    ]
+    headline_lines = []
+    for key, label in news_labels:
+        articles = (news_categories or {}).get(key) or []
+        if articles:
+            top = articles[0]
+            title = escape_html_digest(top.get("title", ""))
+            link = top.get("link", "")
+            headline_lines.append(f'{label}: <a href="{link}">{title}</a>')
+
+    if headline_lines:
+        lines.append("")
+        lines.append("📰 <b>Today's Headlines</b>")
+        lines.extend(headline_lines)
+
+    lines.append("")
+    lines.append("🔗 More news: lawsticker-ai.com/news.html")
+    lines.append("🔗 More tools: lawsticker-ai.com/calculators.html")
+    return "\n".join(lines)
+
+
+@app.route('/api/daily-digest', methods=['GET'])
+def daily_digest():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not site_token or not bot_token or not chat_id:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        petrol_text = fetch_text_digest(PETROL_URL)
+        diesel_text = fetch_text_digest(DIESEL_URL)
+        petrol = extract_fuel_price(petrol_text, "petrol")
+        diesel = extract_fuel_price(diesel_text, "diesel")
+
+        if petrol is None or diesel is None:
+            return jsonify({"ok": False, "error": "Could not extract fuel prices — source page format may have changed.", "petrol": petrol, "diesel": diesel})
+
+        config, _ = github_get(DAILYDIGEST_CONFIG_FILE, site_token)
+        rates = (config or {}).get("rates", {})
+        gold = rates.get("gold_24k_per_gram_inr")
+        silver = rates.get("silver_999_per_gram_inr")
+
+        if gold is None or silver is None:
+            return jsonify({"ok": False, "error": "Gold/silver rates not found in site-config.json."})
+
+        state, sha = github_get(DAILYDIGEST_STATE_FILE, site_token)
+        prev = state or {}
+
+        try:
+            news_data, _ = github_get(NEWS_FILE, site_token)
+            news_categories = (news_data or {}).get("categories", {})
+        except Exception:
+            news_categories = {}
+
+        message = build_digest_message(petrol, diesel, gold, silver, prev, news_categories)
+        results = send_telegram_to_all(bot_token, chat_id, message)
+        telegram_sent = all(v == "sent" for v in results.values())
+
+        new_state = {
+            "petrol": petrol, "diesel": diesel, "gold": gold, "silver": silver,
+            "posted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        github_put(DAILYDIGEST_STATE_FILE, site_token, new_state, sha, "Daily digest posted")
+
+        return jsonify({"ok": True, "telegram_sent": telegram_sent, "telegram_results": results, "values": new_state})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# 10. Multilingual News Digest — Telugu + Hindi, Regional + National
+# ---------------------------------------------------------------------------
+
+I18N_LANGUAGES = {
+    "te": {
+        "regional": {"q": "Hyderabad OR Telangana", "country": "in", "language": "te"},
+        "national": {"country": "in", "language": "te"},
+    },
+    "hi": {
+        "regional": {"q": "Hyderabad OR Telangana", "country": "in", "language": "hi"},
+        "national": {"country": "in", "language": "hi"},
+    },
+}
+
+
+def fetch_news_i18n(api_key, params):
+    q = dict(params)
+    q["apikey"] = api_key
+    url = NEWSDATA_BASE + "?" + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; LawStickerNews/1.0)"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
+
+
+def extract_articles_i18n(api_response, limit=6):
+    articles = []
+    for item in (api_response.get("results") or [])[:limit]:
+        articles.append({
+            "title": item.get("title", ""),
+            "link": item.get("link", ""),
+            "source": item.get("source_id", "unknown"),
+            "pubDate": item.get("pubDate", ""),
+            "image_url": item.get("image_url"),
+            "description": (item.get("description") or "")[:180],
+            "category": item.get("category") or [],
+        })
+    return articles
+
+
+@app.route('/api/news-digest-i18n', methods=['GET'])
+def news_digest_i18n():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    newsdata_key = os.environ.get("NEWSDATA_API_KEY")
+
+    if not site_token or not newsdata_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        results = {}
+        errors = {}
+        for lang, queries in I18N_LANGUAGES.items():
+            results[lang] = {}
+            for category, params in queries.items():
+                key = f"{lang}_{category}"
+                try:
+                    raw = fetch_news_i18n(newsdata_key, params)
+                    if raw.get("status") == "success":
+                        results[lang][category] = extract_articles_i18n(raw)
+                    else:
+                        errors[key] = raw.get("results", {}).get("message", "Unknown API error")
+                        results[lang][category] = []
+                except urllib.error.HTTPError as e:
+                    try:
+                        errors[key] = e.read().decode()
+                    except Exception:
+                        errors[key] = str(e)
+                    results[lang][category] = []
+                except Exception as e:
+                    errors[key] = str(e)
+                    results[lang][category] = []
+
+        existing, sha = github_get(NEWS_FILE, site_token)
+        output = dict(existing) if existing else {}
+        output["updated_at_i18n"] = datetime.now(timezone.utc).isoformat()
+        output["categories_te"] = results.get("te", {})
+        output["categories_hi"] = results.get("hi", {})
+
+        github_put(NEWS_FILE, site_token, output, sha, "Multilingual news update (te/hi)")
+
+        total = sum(len(v) for lang_data in results.values() for v in lang_data.values())
+        return jsonify({
+            "ok": True,
+            "total_articles": total,
+            "counts": {f"{lang}_{cat}": len(arts) for lang, cats in results.items() for cat, arts in cats.items()},
+            "errors": errors or None,
+        })
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
 # Health check — visit this URL directly in your phone's browser to confirm
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
@@ -1203,7 +1436,8 @@ def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
         "/api/site-activity-digest", "/api/site-watchers",
-        "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate"
+        "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate",
+        "/api/daily-digest", "/api/news-digest-i18n"
     ]})
 
 
