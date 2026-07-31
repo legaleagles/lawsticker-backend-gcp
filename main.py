@@ -2211,6 +2211,8 @@ def daily_sc_digest():
             return jsonify({"ok": False, "error": "AI returned unexpected format."}), 500
 
         entry = {"date": today, **digest}
+        if search_context:
+            entry["source_text"] = search_context[:3000]
         archive, sha = github_get(SC_DIGEST_FILE, site_token)
         if archive is None:
             archive = {"entries": []}
