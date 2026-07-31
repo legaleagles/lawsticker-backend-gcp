@@ -2015,20 +2015,30 @@ SC_DIGEST_SCHEMA = {
 
 
 def call_gemini_search(api_key, prompt):
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
-    }).encode()
-    req = urllib.request.Request(
-        f"{SC_SEARCH_URL}?key={api_key}",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        result = json.loads(resp.read().decode())
-    parts = result["candidates"][0]["content"]["parts"]
-    return " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+    # Gemini 2.0 REST API uses camelCase "googleSearch" for the built-in
+    # Google Search grounding tool. Fallback to no-tool call if this fails
+    # so a bad quota or key issue never takes down the whole endpoint.
+    for tool_key in ("googleSearch", "google_search"):
+        try:
+            payload = json.dumps({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "tools": [{tool_key: {}}],
+            }).encode()
+            req = urllib.request.Request(
+                f"{SC_SEARCH_URL}?key={api_key}",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode())
+            parts = result["candidates"][0]["content"]["parts"]
+            text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    return None
 
 
 def render_sc_card(data, ai_background_bytes=None):
@@ -2155,7 +2165,8 @@ def daily_sc_digest():
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        raw_sc_news = call_gemini_search(gemini_key, (
+        # Step 1: live Google Search grounding — returns None if unavailable
+        search_context = call_gemini_search(gemini_key, (
             f"Today is {today}. Search for the most recent Supreme Court of India "
             "judgment or order from today or this week that directly affects ordinary "
             "citizens — tenants, workers, consumers, patients, students, or families. "
@@ -2165,35 +2176,42 @@ def daily_sc_digest():
             "judgment from the past 7 days."
         ))
 
+        # Build the structuring prompt — grounded if search worked, knowledge-based fallback if not
+        if search_context:
+            source_section = f"RAW SC NEWS (from live Google Search):\n{search_context}"
+        else:
+            source_section = (
+                "Use your most recent training knowledge of Supreme Court of India judgments. "
+                "Pick the most recent and impactful ruling that affects ordinary people — "
+                "tenants, workers, consumers, patients, students, or families. Be specific "
+                "with the case name and ruling, and mark is_recent as false."
+            )
+
         structure_prompt = (
-            "Based on this Supreme Court of India news, create a structured digest for "
-            "LawSticker AI — a legal rights education platform for Telugu, Hindi, and English speakers.\n\n"
-            f"RAW SC NEWS:\n{raw_sc_news}\n\nToday: {today}\n\n"
+            "Create a Supreme Court of India digest for LawSticker AI — a legal rights "
+            "education platform for Telugu, Hindi, and English speakers.\n\n"
+            f"{source_section}\n\nToday: {today}\n\n"
             "Format for ordinary citizens with no legal background:\n"
             "- headline.en: what happened, max 80 chars, plain English, no Latin, no section numbers\n"
-            "- headline.te: accurate Telugu translation of the headline\n"
-            "- headline.hi: accurate Hindi translation of the headline\n"
+            "- headline.te: accurate Telugu translation\n"
+            "- headline.hi: accurate Hindi translation\n"
             "- means.en: what this ruling means for an ordinary person, 1 sentence\n"
             "- means.te / means.hi: accurate translations\n"
             "- action.en: concrete step someone affected should take, 1 sentence\n"
             "- action.te / action.hi: accurate translations\n"
             "- case_ref: full case name or citation\n"
-            "- category: one of CONSUMER | LABOUR | TENANT | HEALTH | EDUCATION | "
+            "- category: CONSUMER | LABOUR | TENANT | HEALTH | EDUCATION | "
             "ENVIRONMENT | CRIMINAL | PROPERTY | FAMILY | OTHER\n"
             "- icon: single emoji matching the category\n"
-            "- source_info: which outlet reported this\n"
-            "- is_recent: true if judgment is from this week"
+            "- source_info: news outlet name, or 'Gemini knowledge base' if no live search\n"
+            "- is_recent: true only if judgment is from this week"
         )
         digest = call_gemini_structured(gemini_key, structure_prompt, SC_DIGEST_SCHEMA, max_tokens=900)
         if not digest or not digest.get("headline"):
             return jsonify({"ok": False, "error": "AI returned unexpected format."}), 500
 
-        art_theme = (
-            f"Indian supreme court justice, {digest.get('category', 'legal').lower()} law, "
-            "scales of justice silhouette, dramatic courthouse lighting, deep navy atmosphere"
-        )
-        ai_background = call_gemini_image(gemini_key, art_theme)
-        image_bytes = render_sc_card(digest, ai_background_bytes=ai_background)
+        # Plain gradient — no AI image needed for an informational card
+        image_bytes = render_sc_card(digest)
 
         entry = {"date": today, **digest}
         archive, sha = github_get(SC_DIGEST_FILE, site_token)
