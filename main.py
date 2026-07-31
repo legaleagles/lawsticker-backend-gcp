@@ -2095,7 +2095,7 @@ def render_sc_card(data, ai_background_bytes=None):
     img.alpha_composite(wm, (int(W / 2 - 350), 1050))
     draw = ImageDraw.Draw(img)
 
-    badge_text = "⚖️ SC TODAY"
+    badge_text = "SC TODAY"
     bw = draw.textlength(badge_text, font=bold_36) + 76
     draw.rounded_rectangle([(W/2 - bw/2, 260), (W/2 + bw/2, 338)], radius=39, fill=ACCENT)
     draw_centered(draw, badge_text, bold_36, W/2, 280, (13, 17, 23))
