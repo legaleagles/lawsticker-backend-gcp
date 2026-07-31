@@ -2008,6 +2008,7 @@ SC_DIGEST_SCHEMA = {
         "category":   {"type": "string"},
         "icon":       {"type": "string"},
         "source_info":{"type": "string"},
+        "source_url": {"type": "string"},
         "is_recent":  {"type": "boolean"},
     },
     "required": ["headline", "means", "action", "case_ref", "category", "icon"],
@@ -2202,6 +2203,7 @@ def daily_sc_digest():
             "ENVIRONMENT | CRIMINAL | PROPERTY | FAMILY | OTHER\n"
             "- icon: single emoji matching the category\n"
             "- source_info: news outlet name, or 'Gemini knowledge base' if no live search\n"
+            "- source_url: direct URL to the judgment or news article if you found one via live search — empty string if unknown (never invent a URL)\n"
             "- is_recent: true only if judgment is from this week"
         )
         digest = call_gemini_structured(gemini_key, structure_prompt, SC_DIGEST_SCHEMA, max_tokens=900)
