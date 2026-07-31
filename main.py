@@ -103,6 +103,19 @@ def send_telegram_with_buttons(bot_token, chat_id, text, report_id):
         return json.loads(resp.read().decode())
 
 
+def send_telegram_link_message(bot_token, chat_id, text, button_text, button_url):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [[{"text": button_text, "url": button_url}]]},
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
 def edit_telegram_message(bot_token, chat_id, message_id, text):
     url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
     payload = json.dumps({
@@ -1940,16 +1953,17 @@ def daily_social_card():
 
         source_page = card_data.get('source_page', '')
         page_url = f"https://lawsticker-ai.com/{source_page}.html" if source_page else "https://lawsticker-ai.com"
-        caption = (
-            f"📲 <b>Today's shareable card</b>\n\n"
-            f"Forward this to your WhatsApp Status, Instagram, or wherever — "
-            f"ready as-is."
-        )
+        # The photo itself carries no caption — it's forwarded as-is to
+        # WhatsApp Status / Instagram / wherever, and anything written here
+        # would ride along with it. The forwarding note and full-story link
+        # live in a separate follow-up message instead, so they stay in
+        # Telegram and never bleed into the shared image.
+        followup = "📲 <b>Today's shareable card</b> — forward the image above to your WhatsApp Status, Instagram, or wherever."
         results = {}
         for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
             try:
-                send_telegram_photo(bot_token, cid, image_bytes, caption,
-                                     button_text="🔗 Read Full Story", button_url=page_url)
+                send_telegram_photo(bot_token, cid, image_bytes)
+                send_telegram_link_message(bot_token, cid, followup, "🔗 Read Full Story", page_url)
                 results[cid] = "sent"
             except Exception as e:
                 results[cid] = f"failed: {e}"
