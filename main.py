@@ -2157,9 +2157,7 @@ def render_sc_card(data, ai_background_bytes=None):
 def daily_sc_digest():
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key  = os.environ.get("GEMINI_API_KEY")
-    bot_token   = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id     = os.environ.get("TELEGRAM_CHAT_ID")
-    if not site_token or not gemini_key or not bot_token or not chat_id:
+    if not site_token or not gemini_key:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
     try:
@@ -2210,9 +2208,6 @@ def daily_sc_digest():
         if not digest or not digest.get("headline"):
             return jsonify({"ok": False, "error": "AI returned unexpected format."}), 500
 
-        # Plain gradient — no AI image needed for an informational card
-        image_bytes = render_sc_card(digest)
-
         entry = {"date": today, **digest}
         archive, sha = github_get(SC_DIGEST_FILE, site_token)
         if archive is None:
@@ -2222,19 +2217,7 @@ def daily_sc_digest():
         archive = {"last_updated": today, "entries": entries[:30]}
         github_put(SC_DIGEST_FILE, site_token, archive, sha, f"SC digest {today}")
 
-        results = {}
-        for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
-            try:
-                send_telegram_photo(
-                    bot_token, cid, image_bytes,
-                    button_text="🔗 Read in Your Language",
-                    button_url="https://lawsticker-ai.com/sc-today.html",
-                )
-                results[cid] = "sent"
-            except Exception as e:
-                results[cid] = f"failed: {e}"
-
-        return jsonify({"ok": True, "digest": digest, "telegram_results": results})
+        return jsonify({"ok": True, "digest": digest})
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
