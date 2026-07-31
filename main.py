@@ -1953,12 +1953,11 @@ def daily_social_card():
 
         source_page = card_data.get('source_page', '')
         page_url = f"https://lawsticker-ai.com/{source_page}.html" if source_page else "https://lawsticker-ai.com"
-        # The photo itself carries no caption — it's forwarded as-is to
-        # WhatsApp Status / Instagram / wherever, and anything written here
-        # would ride along with it. The forwarding note and full-story link
-        # live in a separate follow-up message instead, so they stay in
-        # Telegram and never bleed into the shared image.
-        followup = "📲 <b>Today's shareable card</b> — forward the image above to your WhatsApp Status, Instagram, or wherever."
+        # The photo itself carries no caption, so it stays forward-clean to
+        # WhatsApp Status / Instagram / wherever. The Read Full Story link
+        # goes out as a separate follow-up message so it stays in Telegram
+        # instead of bleeding into the shared image.
+        followup = "📲 <b>Today's shareable card</b>"
         results = {}
         for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
             try:
