@@ -1959,6 +1959,287 @@ def daily_social_card():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# 13. Supreme Court Today — daily Gemini Search digest in EN/TE/HI.
+#     Two-step: (1) Gemini with Google Search grounding to find today's
+#     most people-relevant SC judgment; (2) Gemini structured to format
+#     it trilingual. PIL card in English (LiberationSans is Latin-only);
+#     all three languages live in sc-digest.json for the sc-today.html page.
+# ---------------------------------------------------------------------------
+
+SC_DIGEST_FILE = "sc-digest.json"
+SC_SEARCH_MODEL = "gemini-2.0-flash"
+SC_SEARCH_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{SC_SEARCH_MODEL}:generateContent"
+)
+
+SC_DIGEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "headline": {
+            "type": "object",
+            "properties": {
+                "en": {"type": "string"},
+                "te": {"type": "string"},
+                "hi": {"type": "string"},
+            },
+            "required": ["en", "te", "hi"],
+        },
+        "means": {
+            "type": "object",
+            "properties": {
+                "en": {"type": "string"},
+                "te": {"type": "string"},
+                "hi": {"type": "string"},
+            },
+            "required": ["en", "te", "hi"],
+        },
+        "action": {
+            "type": "object",
+            "properties": {
+                "en": {"type": "string"},
+                "te": {"type": "string"},
+                "hi": {"type": "string"},
+            },
+            "required": ["en", "te", "hi"],
+        },
+        "case_ref":   {"type": "string"},
+        "category":   {"type": "string"},
+        "icon":       {"type": "string"},
+        "source_info":{"type": "string"},
+        "is_recent":  {"type": "boolean"},
+    },
+    "required": ["headline", "means", "action", "case_ref", "category", "icon"],
+}
+
+
+def call_gemini_search(api_key, prompt):
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+    }).encode()
+    req = urllib.request.Request(
+        f"{SC_SEARCH_URL}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        result = json.loads(resp.read().decode())
+    parts = result["candidates"][0]["content"]["parts"]
+    return " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+
+
+def render_sc_card(data, ai_background_bytes=None):
+    W, H = 1080, 1920
+    img = Image.new('RGBA', (W, H), (13, 17, 23, 255))
+    draw = ImageDraw.Draw(img)
+    ACCENT = (0xC9, 0xA2, 0x27)
+
+    used_ai = False
+    if ai_background_bytes:
+        try:
+            bg = Image.open(io.BytesIO(ai_background_bytes)).convert('RGBA')
+            br = bg.width / bg.height
+            tr = W / H
+            if br > tr:
+                nw, nh = int(H * br), H
+            else:
+                nw, nh = W, int(W / br)
+            bg = bg.resize((nw, nh), Image.LANCZOS)
+            bg = bg.crop(((nw - W) // 2, (nh - H) // 2, (nw - W) // 2 + W, (nh - H) // 2 + H))
+            img.alpha_composite(bg)
+            ov = Image.new('RGBA', (W, H), (13, 17, 23, 0))
+            od = ImageDraw.Draw(ov)
+            for y in range(H):
+                a = int(100 + 80 * abs(y / H - 0.5) * 2)
+                od.line([(0, y), (W, y)], fill=(13, 17, 23, a))
+            img.alpha_composite(ov)
+            draw = ImageDraw.Draw(img)
+            used_ai = True
+        except Exception:
+            pass
+
+    if not used_ai:
+        for y in range(H):
+            t = y / H
+            t2 = t / 0.5 if t <= 0.5 else (t - 0.5) / 0.5
+            c0 = (0x0D, 0x11, 0x17) if t <= 0.5 else (0x12, 0x1A, 0x2E)
+            c1 = (0x12, 0x1A, 0x2E) if t <= 0.5 else (0x0D, 0x11, 0x17)
+            draw.line([(0, y), (W, y)], fill=tuple(int(c0[i] + (c1[i] - c0[i]) * t2) for i in range(3)))
+
+    font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    bold_58 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 58)
+    bold_50 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 50)
+    bold_36 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 36)
+    bold_32 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Bold.ttf"), 32)
+    reg_38 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Regular.ttf"), 38)
+    reg_28 = ImageFont.truetype(os.path.join(font_dir, "LiberationSans-Regular.ttf"), 28)
+
+    icon = data.get("icon", "⚖️")
+
+    draw.rectangle([(0, 0), (W, 16)], fill=ACCENT)
+
+    wm = render_emoji_layer(font_dir, icon, 700, opacity=0.06)
+    img.alpha_composite(wm, (int(W / 2 - 350), 1050))
+    draw = ImageDraw.Draw(img)
+
+    badge_text = "⚖️ SC TODAY"
+    bw = draw.textlength(badge_text, font=bold_36) + 76
+    draw.rounded_rectangle([(W/2 - bw/2, 260), (W/2 + bw/2, 338)], radius=39, fill=ACCENT)
+    draw_centered(draw, badge_text, bold_36, W/2, 280, (13, 17, 23))
+
+    icon_layer = render_emoji_layer(font_dir, icon, 130)
+    img.alpha_composite(icon_layer, (int(W/2 - 65), 370))
+    draw = ImageDraw.Draw(img)
+
+    headline = data.get("headline", {}).get("en", "")
+    lines = wrap_lines(draw, headline, bold_58, W - 140)
+    y = 540
+    for line in lines:
+        draw_centered(draw, line, bold_58, W/2, y, (255, 255, 255))
+        y += 76
+    headline_end = y
+
+    category = data.get("category", "SC RULING")
+    draw_centered(draw, category, bold_32, W/2, headline_end + 20, ACCENT)
+
+    div1 = headline_end + 80
+    draw.line([(120, div1), (W - 120, div1)], fill=(201, 162, 39, 150), width=2)
+
+    draw_centered(draw, "WHAT IT MEANS", bold_36, W/2, div1 + 28, ACCENT)
+    means_lines = wrap_lines(draw, data.get("means", {}).get("en", ""), reg_38, W - 180)
+    yy = div1 + 86
+    for line in means_lines:
+        draw_centered(draw, line, reg_38, W/2, yy, (255, 255, 255, 220))
+        yy += 54
+    means_end = yy
+
+    div2 = means_end + 28
+    draw.line([(120, div2), (W - 120, div2)], fill=(201, 162, 39, 120), width=2)
+
+    draw_centered(draw, "WHAT TO DO", bold_36, W/2, div2 + 28, ACCENT)
+    action_lines = wrap_lines(draw, data.get("action", {}).get("en", ""), reg_38, W - 180)
+    yyy = div2 + 86
+    for line in action_lines:
+        draw_centered(draw, line, reg_38, W/2, yyy, (255, 255, 255, 200))
+        yyy += 54
+    action_end = yyy
+
+    case_ref = data.get("case_ref", "")
+    if case_ref:
+        draw_centered(draw, case_ref, reg_28, W/2, action_end + 36, (201, 162, 39, 180))
+
+    draw.rectangle([(0, H - 300), (W, H)], fill=(28, 25, 15, 255))
+    draw_centered(draw, "LawSticker AI", bold_50, W/2, H - 215, (245, 215, 110))
+    draw_centered(draw, "Supreme Court. Plain Language. Free.", reg_38, W/2, H - 155, (255, 255, 255, 180))
+    draw_centered(draw, "lawsticker-ai.com/sc-today.html", bold_36, W/2, H - 95, (245, 215, 110))
+    icon_footer = render_emoji_layer(font_dir, "⚖️", 56)
+    img.alpha_composite(icon_footer, (int(W/2 - 260), H - 245))
+
+    buf = io.BytesIO()
+    img.convert('RGB').save(buf, format='PNG')
+    return buf.getvalue()
+
+
+@app.route('/api/daily-sc-digest', methods=['GET'])
+def daily_sc_digest():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key  = os.environ.get("GEMINI_API_KEY")
+    bot_token   = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id     = os.environ.get("TELEGRAM_CHAT_ID")
+    if not site_token or not gemini_key or not bot_token or not chat_id:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        raw_sc_news = call_gemini_search(gemini_key, (
+            f"Today is {today}. Search for the most recent Supreme Court of India "
+            "judgment or order from today or this week that directly affects ordinary "
+            "citizens — tenants, workers, consumers, patients, students, or families. "
+            "Report: (1) exact case name or number, (2) what the court ruled, "
+            "(3) which category of people it affects, (4) practical impact on citizens. "
+            "Be factual and specific. If nothing from today, use the most impactful "
+            "judgment from the past 7 days."
+        ))
+
+        structure_prompt = (
+            "Based on this Supreme Court of India news, create a structured digest for "
+            "LawSticker AI — a legal rights education platform for Telugu, Hindi, and English speakers.\n\n"
+            f"RAW SC NEWS:\n{raw_sc_news}\n\nToday: {today}\n\n"
+            "Format for ordinary citizens with no legal background:\n"
+            "- headline.en: what happened, max 80 chars, plain English, no Latin, no section numbers\n"
+            "- headline.te: accurate Telugu translation of the headline\n"
+            "- headline.hi: accurate Hindi translation of the headline\n"
+            "- means.en: what this ruling means for an ordinary person, 1 sentence\n"
+            "- means.te / means.hi: accurate translations\n"
+            "- action.en: concrete step someone affected should take, 1 sentence\n"
+            "- action.te / action.hi: accurate translations\n"
+            "- case_ref: full case name or citation\n"
+            "- category: one of CONSUMER | LABOUR | TENANT | HEALTH | EDUCATION | "
+            "ENVIRONMENT | CRIMINAL | PROPERTY | FAMILY | OTHER\n"
+            "- icon: single emoji matching the category\n"
+            "- source_info: which outlet reported this\n"
+            "- is_recent: true if judgment is from this week"
+        )
+        digest = call_gemini_structured(gemini_key, structure_prompt, SC_DIGEST_SCHEMA, max_tokens=900)
+        if not digest or not digest.get("headline"):
+            return jsonify({"ok": False, "error": "AI returned unexpected format."}), 500
+
+        art_theme = (
+            f"Indian supreme court justice, {digest.get('category', 'legal').lower()} law, "
+            "scales of justice silhouette, dramatic courthouse lighting, deep navy atmosphere"
+        )
+        ai_background = call_gemini_image(gemini_key, art_theme)
+        image_bytes = render_sc_card(digest, ai_background_bytes=ai_background)
+
+        entry = {"date": today, **digest}
+        archive, sha = github_get(SC_DIGEST_FILE, site_token)
+        if archive is None:
+            archive = {"entries": []}
+        entries = [e for e in archive.get("entries", []) if e.get("date") != today]
+        entries.insert(0, entry)
+        archive = {"last_updated": today, "entries": entries[:30]}
+        github_put(SC_DIGEST_FILE, site_token, archive, sha, f"SC digest {today}")
+
+        results = {}
+        for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+            try:
+                send_telegram_photo(
+                    bot_token, cid, image_bytes,
+                    button_text="🔗 Read in Your Language",
+                    button_url="https://lawsticker-ai.com/sc-today.html",
+                )
+                results[cid] = "sent"
+            except Exception as e:
+                results[cid] = f"failed: {e}"
+
+        return jsonify({"ok": True, "digest": digest, "telegram_results": results})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/api/sc-digest-data', methods=['GET'])
+def sc_digest_data():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    try:
+        archive, _ = github_get(SC_DIGEST_FILE, site_token)
+        if not archive:
+            return jsonify({"ok": True, "entries": [], "last_updated": None})
+        return jsonify({
+            "ok": True,
+            "entries": archive.get("entries", []),
+            "last_updated": archive.get("last_updated"),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
 
@@ -1968,7 +2249,9 @@ def health():
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
         "/api/site-activity-digest", "/api/site-watchers",
         "/api/ask-ai", "/api/scam-ed", "/api/scam-moderate",
-        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz", "/api/telegram-webhook", "/api/daily-social-card"
+        "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz",
+        "/api/telegram-webhook", "/api/daily-social-card",
+        "/api/daily-sc-digest", "/api/sc-digest-data",
     ]})
 
 
