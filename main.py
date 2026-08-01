@@ -1040,6 +1040,8 @@ def scam_ed():
             "anonymized_story": parsed["anonymized_story"],
             "lang": lang,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "origin": "user_submitted",
+            "origin_date": datetime.now(timezone.utc).date().isoformat(),
             "status": "pending",
         })
         pending["entries"] = pending["entries"][-500:]
@@ -1215,6 +1217,8 @@ def process_scam_decision(report_id, action, site_token):
             "status": "approved",
             "submitted_at": target.get("submitted_at", ""),
             "approved_at": datetime.now(timezone.utc).isoformat(),
+            "origin": target.get("origin", "user_submitted"),
+            "origin_date": target.get("origin_date", ""),
         }
         if enrichment:
             public_entry["enrichment"] = enrichment
@@ -2245,6 +2249,154 @@ def sc_digest_data():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+AI_SCAM_TOPICS = [
+    ("Phone Scam",       "Fake KYC expiry call from bank impersonator"),
+    ("Phone Scam",       "Fake customs/courier parcel seized scam"),
+    ("Phone Scam",       "Fake electricity disconnection threat"),
+    ("Phone Scam",       "Fake police arrest warrant / digital arrest"),
+    ("Phone Scam",       "OTP phishing via fake telecom executive"),
+    ("Digital/Cyber",    "SIM swap and OTP hijack to drain bank accounts"),
+    ("Digital/Cyber",    "Fake loan app data extortion and harassment"),
+    ("Digital/Cyber",    "Aadhaar-enabled payment fraud via AePS"),
+    ("Digital/Cyber",    "WhatsApp account takeover and impersonation of contacts"),
+    ("Digital/Cyber",    "Screen-sharing scam posing as tech support"),
+    ("Investment",       "Pig butchering long-con investment fraud via social media"),
+    ("Investment",       "Fake IPO / SME share allotment advance fee"),
+    ("Investment",       "Ponzi scheme disguised as gold or commodity trading"),
+    ("Investment",       "Fake mutual fund advisor churning client accounts"),
+    ("Investment",       "Unlicensed forex trading platform with false returns"),
+    ("Job Offer",        "Part-time task fraud on fake rating platforms"),
+    ("Job Offer",        "Advance fee demanded for government job offer"),
+    ("Job Offer",        "Work-from-home data entry advance payment trap"),
+    ("Job Offer",        "Fake placement agency charging registration fees"),
+    ("Online Shopping",  "Non-delivery after UPI payment to fake seller"),
+    ("Online Shopping",  "Counterfeit goods sold as branded on social media"),
+    ("Online Shopping",  "OLX / second-hand marketplace QR code refund scam"),
+    ("Loan/Financial",   "Instant loan app with hidden processing fee trap"),
+    ("Loan/Financial",   "Fake DSA charging upfront insurance to disburse loan"),
+    ("Loan/Financial",   "Credit card reward point redemption phishing"),
+    ("Pyramid Scheme/MLM", "Health product MLM with mandatory downline recruitment"),
+    ("Pyramid Scheme/MLM", "Cryptocurrency MLM with token staking rewards"),
+    ("Other",            "Fake charity / PM relief fund collection after disaster"),
+    ("Other",            "Matrimonial profile fraud leading to money transfer"),
+    ("Other",            "Fake rental property advance payment scam"),
+]
+
+
+def pick_ai_scam_topic(today_str, pending_entries):
+    import hashlib
+    recent_labels = set()
+    ai_entries = [e for e in pending_entries if e.get("origin") == "ai_generated"]
+    for e in ai_entries[-30:]:
+        recent_labels.add(e.get("title", "")[:40])
+
+    seed = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
+    for offset in range(len(AI_SCAM_TOPICS)):
+        idx = (seed + offset) % len(AI_SCAM_TOPICS)
+        category, label = AI_SCAM_TOPICS[idx]
+        if label[:40] not in recent_labels:
+            return category, label
+    category, label = AI_SCAM_TOPICS[seed % len(AI_SCAM_TOPICS)]
+    return category, label
+
+
+def build_ai_scam_ed_prompt(category, topic_label):
+    return f"""You are a consumer protection writer for an Indian legal-aid platform.
+
+Write a scam awareness entry about: "{topic_label}" (category: {category}).
+
+Use only well-documented, publicly reported information about this type of fraud in India.
+Do not name any specific company, individual, or app unless it is a government body or regulator.
+Write in plain simple English that a first-time smartphone user can understand.
+Be generous with depth — this is the only entry published today and readers rely on it.
+
+Return a JSON object with exactly these fields:
+
+category: one of {SCAMED_CATEGORIES}
+title: a specific, vivid headline (max 15 words) describing what victims actually experience
+anonymized_story: 3–4 paragraphs. First: how the scam typically starts. Second: how it escalates. Third/fourth: what victims usually discover too late.
+remedy_advice: 4–6 paragraphs covering BEFORE (how to avoid), DURING (what to do if you're mid-scam), and AFTER (reporting steps: 1930 helpline, cybercrime.gov.in, FIR, bank recall). Include the relevant section of IT Act 2000, BNS/IPC, or SEBI/RBI regulation that applies.
+
+Write as a trusted friend who has seen this happen, not as a legal document."""
+
+
+@app.route('/api/daily-scam-ed', methods=['GET'])
+def daily_scam_ed():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        today_str = datetime.now(timezone.utc).date().isoformat()
+
+        pending, sha = github_get(PENDING_FILE, site_token, timeout=8)
+        if pending is None:
+            pending = {"entries": []}
+        entries = pending.get("entries", [])
+
+        # Idempotent guard — skip if already generated today
+        for e in entries:
+            if e.get("origin") == "ai_generated" and e.get("origin_date") == today_str:
+                return jsonify({"ok": True, "skipped": True, "reason": "Already generated for today.", "ref": e.get("ref_number", "")})
+
+        category, topic_label = pick_ai_scam_topic(today_str, entries)
+        prompt = build_ai_scam_ed_prompt(category, topic_label)
+
+        try:
+            parsed = call_gemini_structured(gemini_key, prompt, SCAMED_RESPONSE_SCHEMA, max_tokens=1800)
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            return jsonify({"ok": False, "error": f"Gemini error {e.code}: {error_body[:200]}"}), 502
+
+        if not parsed or not parsed.get("anonymized_story"):
+            return jsonify({"ok": False, "error": "Gemini returned an empty or invalid response."}), 502
+
+        internal_id = f"scam-ai-{int(datetime.now(timezone.utc).timestamp())}"
+        ref_number = "AI-" + today_str.replace("-", "")[2:]  # e.g. AI-260801
+
+        entries.append({
+            "id": internal_id,
+            "ref_number": ref_number,
+            "category": parsed["category"],
+            "title": parsed["title"],
+            "anonymized_story": parsed["anonymized_story"],
+            "remedy_advice": parsed.get("remedy_advice", ""),
+            "lang": "en",
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "origin": "ai_generated",
+            "origin_date": today_str,
+            "status": "pending",
+        })
+        pending["entries"] = entries[-500:]
+        github_put(PENDING_FILE, site_token, pending, sha, f"AI daily scam-ed entry {today_str}", timeout=10)
+
+        if bot_token and chat_id:
+            try:
+                alert_text = (
+                    f"🤖 <b>Daily AI Scam Bulletin</b> ({ref_number})\n"
+                    f"Topic: <i>{topic_label}</i>\n"
+                    f"Category: {parsed['category']}\n\n"
+                    f"<b>Title:</b> {parsed['title']}\n\n"
+                    f"{parsed['anonymized_story'][:900]}\n\n"
+                    f"Tap below to approve or reject."
+                )
+                for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+                    try:
+                        send_telegram_with_buttons(bot_token, cid, alert_text, internal_id)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return jsonify({"ok": True, "ref_number": ref_number, "category": parsed["category"], "title": parsed["title"]})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
 
@@ -2257,6 +2409,7 @@ def health():
         "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz",
         "/api/telegram-webhook", "/api/daily-social-card",
         "/api/daily-sc-digest", "/api/sc-digest-data",
+        "/api/daily-scam-ed",
     ]})
 
 
