@@ -2347,18 +2347,24 @@ AI_DUP_CHECK_SCHEMA = {
 }
 
 
-def pick_ai_scam_topic(today_str, pending_entries):
+N_PER_DAY = 3  # AI stories generated per cron run
+
+
+def pick_ai_scam_topic(today_str, pending_entries, skip_topics=None):
+    skip_topics = skip_topics or set()
     recent_labels = set()
     ai_entries = [e for e in pending_entries if e.get("origin") == "ai_generated"]
     for e in ai_entries[-30:]:
         key = (e.get("title_en") or e.get("title") or "")[:40]
         recent_labels.add(key)
+        if e.get("topic_label"):
+            recent_labels.add(e["topic_label"][:40])
 
     seed = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
     for offset in range(len(AI_SCAM_TOPICS)):
         idx = (seed + offset) % len(AI_SCAM_TOPICS)
         category, label = AI_SCAM_TOPICS[idx]
-        if label[:40] not in recent_labels:
+        if label[:40] not in recent_labels and label not in skip_topics:
             return category, label
     return AI_SCAM_TOPICS[seed % len(AI_SCAM_TOPICS)]
 
@@ -2477,14 +2483,17 @@ def daily_scam_ed():
             pending = {"entries": []}
         pending_entries = pending.get("entries", [])
 
-        # Idempotent guard
-        for e in pending_entries:
-            if e.get("origin") == "ai_generated" and e.get("origin_date") == today_str:
-                return jsonify({"ok": True, "skipped": True,
-                                "reason": "Already generated for today.",
-                                "ref": e.get("ref_number", "")})
+        # Count how many AI entries already exist for today
+        today_ai = [
+            e for e in pending_entries
+            if e.get("origin") == "ai_generated" and e.get("origin_date") == today_str
+        ]
+        slots_remaining = N_PER_DAY - len(today_ai)
+        if slots_remaining <= 0:
+            return jsonify({"ok": True, "skipped": True,
+                            "reason": f"Already generated {N_PER_DAY} entries for today."})
 
-        # Load public file for duplicate check
+        # Load public file for duplicate check (one fetch, used across all iterations)
         try:
             public_data, public_sha = github_get(PUBLIC_FILE, site_token, timeout=8)
             if public_data is None:
@@ -2492,103 +2501,111 @@ def daily_scam_ed():
         except Exception:
             public_data, public_sha = {"entries": []}, None
 
-        all_entries = pending_entries + public_data.get("entries", [])
-        category, topic_label = pick_ai_scam_topic(today_str, pending_entries)
+        generated = []   # list of (entry_dict, parsed, topic_label, ref_number)
+        used_topics = set()
+        ts_base = int(datetime.now(timezone.utc).timestamp())
 
-        # Step 1: cheap Python prefilter
-        candidates = prefilter_duplicate_candidates(topic_label, category, all_entries)
+        for attempt in range(slots_remaining + 4):  # a few spare tries for duplicates
+            if len(generated) >= slots_remaining:
+                break
 
-        # Step 2: Gemini duplicate judgment (only when prefilter found candidates)
-        if candidates:
-            candidate_titles = [
-                e.get("title_en") or e.get("title", "") for e in candidates
-            ]
-            dup = check_duplicate_with_gemini(gemini_key, topic_label, candidate_titles)
-            if dup.get("is_duplicate"):
-                matched_title = dup.get("matching_title", "")
-                matched_entry = next(
-                    (e for e in candidates
-                     if (e.get("title_en") or e.get("title", "")) == matched_title),
-                    candidates[0]
+            all_entries = pending_entries + public_data.get("entries", [])
+            category, topic_label = pick_ai_scam_topic(today_str, pending_entries, skip_topics=used_topics)
+            used_topics.add(topic_label)
+
+            # Duplicate prefilter
+            candidates = prefilter_duplicate_candidates(topic_label, category, all_entries)
+            if candidates:
+                candidate_titles = [e.get("title_en") or e.get("title", "") for e in candidates]
+                dup = check_duplicate_with_gemini(gemini_key, topic_label, candidate_titles)
+                if dup.get("is_duplicate"):
+                    continue  # skip, try next topic
+
+            # Generate
+            prompt = build_ai_scam_ed_prompt_v2(category, topic_label)
+            try:
+                parsed = call_gemini_structured(
+                    gemini_key, prompt, AI_DAILY_SCAM_ED_SCHEMA, max_tokens=4000
                 )
-                increment_reported_count(
-                    matched_entry["id"],
-                    pending, pending_sha,
-                    public_data, public_sha,
-                    site_token,
-                )
-                return jsonify({"ok": True, "skipped": True,
-                                "reason": "Duplicate — reported_count incremented.",
-                                "matched": matched_title})
+            except urllib.error.HTTPError as he:
+                body = he.read().decode()
+                return jsonify({"ok": False, "error": f"Gemini error {he.code}: {body[:200]}"}), 502
 
-        # Step 3: Generate full trilingual entry
-        prompt = build_ai_scam_ed_prompt_v2(category, topic_label)
-        try:
-            parsed = call_gemini_structured(
-                gemini_key, prompt, AI_DAILY_SCAM_ED_SCHEMA, max_tokens=4000
-            )
-        except urllib.error.HTTPError as he:
-            body = he.read().decode()
-            return jsonify({"ok": False, "error": f"Gemini error {he.code}: {body[:200]}"}), 502
+            if not parsed or not parsed.get("story_en"):
+                continue
 
-        if not parsed or not parsed.get("story_en"):
-            return jsonify({"ok": False,
-                            "error": "Gemini returned an empty or invalid response."}), 502
+            seq = len(generated) + 1
+            internal_id = f"scam-ai-{ts_base + seq}"
+            ref_number  = f"AI-{today_str.replace('-', '')[2:]}-{seq}"
 
-        internal_id = f"scam-ai-{int(datetime.now(timezone.utc).timestamp())}"
-        ref_number  = "AI-" + today_str.replace("-", "")[2:]
+            entry = {
+                "id":               internal_id,
+                "ref_number":       ref_number,
+                "topic_label":      topic_label,
+                "category":         parsed["category"],
+                "title_en":         parsed["title_en"],
+                "title_te":         parsed["title_te"],
+                "title_hi":         parsed["title_hi"],
+                "title":            parsed["title_en"],
+                "story_en":         parsed["story_en"],
+                "story_te":         parsed["story_te"],
+                "story_hi":         parsed["story_hi"],
+                "anonymized_story": parsed["story_en"],
+                "remedies": {
+                    "en": parsed["remedies_en"],
+                    "te": parsed["remedies_te"],
+                    "hi": parsed["remedies_hi"],
+                },
+                "source_note":      parsed.get("source_note", ""),
+                "lang":             "en",
+                "submitted_at":     datetime.now(timezone.utc).isoformat(),
+                "origin":           "ai_generated",
+                "origin_date":      today_str,
+                "reported_count":   1,
+                "status":           "pending",
+            }
+            pending_entries.append(entry)
+            generated.append((entry, parsed, topic_label, ref_number))
 
-        pending_entries.append({
-            "id":               internal_id,
-            "ref_number":       ref_number,
-            "category":         parsed["category"],
-            "title_en":         parsed["title_en"],
-            "title_te":         parsed["title_te"],
-            "title_hi":         parsed["title_hi"],
-            "title":            parsed["title_en"],       # fallback for existing template
-            "story_en":         parsed["story_en"],
-            "story_te":         parsed["story_te"],
-            "story_hi":         parsed["story_hi"],
-            "anonymized_story": parsed["story_en"],       # fallback for existing template
-            "remedies": {
-                "en": parsed["remedies_en"],
-                "te": parsed["remedies_te"],
-                "hi": parsed["remedies_hi"],
-            },
-            "source_note":      parsed.get("source_note", ""),
-            "lang":             "en",
-            "submitted_at":     datetime.now(timezone.utc).isoformat(),
-            "origin":           "ai_generated",
-            "origin_date":      today_str,
-            "reported_count":   1,
-            "status":           "pending",
-        })
+        if not generated:
+            return jsonify({"ok": True, "skipped": True,
+                            "reason": "All candidate topics were duplicates."})
+
+        # Single write for all generated entries
         pending["entries"] = pending_entries[-500:]
         github_put(PENDING_FILE, site_token, pending, pending_sha,
-                   f"AI daily scam-ed entry {today_str}", timeout=10)
+                   f"AI daily scam-ed {today_str} ({len(generated)} entries)", timeout=15)
 
+        # Telegram notifications — one message per story
         if bot_token and chat_id:
-            try:
-                before_steps = parsed.get("remedies_en", {}).get("before", [])
-                alert_text = (
-                    f"🤖 <b>Daily AI Scam Bulletin</b> ({ref_number})\n"
-                    f"Topic: <i>{topic_label}</i> · {parsed['category']}\n\n"
-                    f"<b>{parsed['title_en']}</b>\n\n"
-                    f"{parsed['story_en'][:600]}\n\n"
-                    f"<b>Prevention:</b>\n"
-                    + "\n".join(f"• {s}" for s in before_steps[:3])
-                    + "\n\nTap below to approve or reject."
-                )
-                for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
-                    try:
-                        send_telegram_with_buttons(bot_token, cid, alert_text, internal_id)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            for entry, parsed, topic_label, ref_number in generated:
+                try:
+                    before_steps = parsed.get("remedies_en", {}).get("before", [])
+                    alert_text = (
+                        f"🤖 <b>Daily AI Scam Bulletin</b> ({ref_number})\n"
+                        f"Topic: <i>{topic_label}</i> · {parsed['category']}\n\n"
+                        f"<b>{parsed['title_en']}</b>\n\n"
+                        f"{parsed['story_en'][:600]}\n\n"
+                        f"<b>Prevention:</b>\n"
+                        + "\n".join(f"• {s}" for s in before_steps[:3])
+                        + "\n\nTap below to approve or reject."
+                    )
+                    for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+                        try:
+                            send_telegram_with_buttons(bot_token, cid, alert_text, entry["id"])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
-        return jsonify({"ok": True, "ref_number": ref_number,
-                        "category": parsed["category"], "title": parsed["title_en"]})
+        return jsonify({
+            "ok": True,
+            "generated": len(generated),
+            "entries": [
+                {"ref_number": ref_number, "category": parsed["category"], "title": parsed["title_en"]}
+                for _, parsed, _, ref_number in generated
+            ],
+        })
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
