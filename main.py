@@ -2250,45 +2250,101 @@ def sc_digest_data():
 
 
 AI_SCAM_TOPICS = [
-    ("Phone Scam",       "Fake KYC expiry call from bank impersonator"),
-    ("Phone Scam",       "Fake customs/courier parcel seized scam"),
-    ("Phone Scam",       "Fake electricity disconnection threat"),
-    ("Phone Scam",       "Fake police arrest warrant / digital arrest"),
-    ("Phone Scam",       "OTP phishing via fake telecom executive"),
-    ("Digital/Cyber",    "SIM swap and OTP hijack to drain bank accounts"),
-    ("Digital/Cyber",    "Fake loan app data extortion and harassment"),
-    ("Digital/Cyber",    "Aadhaar-enabled payment fraud via AePS"),
-    ("Digital/Cyber",    "WhatsApp account takeover and impersonation of contacts"),
-    ("Digital/Cyber",    "Screen-sharing scam posing as tech support"),
-    ("Investment",       "Pig butchering long-con investment fraud via social media"),
-    ("Investment",       "Fake IPO / SME share allotment advance fee"),
-    ("Investment",       "Ponzi scheme disguised as gold or commodity trading"),
-    ("Investment",       "Fake mutual fund advisor churning client accounts"),
-    ("Investment",       "Unlicensed forex trading platform with false returns"),
-    ("Job Offer",        "Part-time task fraud on fake rating platforms"),
-    ("Job Offer",        "Advance fee demanded for government job offer"),
-    ("Job Offer",        "Work-from-home data entry advance payment trap"),
-    ("Job Offer",        "Fake placement agency charging registration fees"),
-    ("Online Shopping",  "Non-delivery after UPI payment to fake seller"),
-    ("Online Shopping",  "Counterfeit goods sold as branded on social media"),
-    ("Online Shopping",  "OLX / second-hand marketplace QR code refund scam"),
-    ("Loan/Financial",   "Instant loan app with hidden processing fee trap"),
-    ("Loan/Financial",   "Fake DSA charging upfront insurance to disburse loan"),
-    ("Loan/Financial",   "Credit card reward point redemption phishing"),
+    ("Phone Scam",         "Fake KYC expiry call from bank impersonator"),
+    ("Phone Scam",         "Fake customs/courier parcel seized scam"),
+    ("Phone Scam",         "Fake electricity disconnection threat"),
+    ("Phone Scam",         "Fake police arrest warrant / digital arrest"),
+    ("Phone Scam",         "OTP phishing via fake telecom executive"),
+    ("Digital/Cyber",      "SIM swap and OTP hijack to drain bank accounts"),
+    ("Digital/Cyber",      "Fake loan app data extortion and harassment"),
+    ("Digital/Cyber",      "Aadhaar-enabled payment fraud via AePS"),
+    ("Digital/Cyber",      "WhatsApp account takeover and impersonation of contacts"),
+    ("Digital/Cyber",      "Screen-sharing scam posing as tech support"),
+    ("Investment",         "Pig butchering long-con investment fraud via social media"),
+    ("Investment",         "Fake IPO / SME share allotment advance fee"),
+    ("Investment",         "Ponzi scheme disguised as gold or commodity trading"),
+    ("Investment",         "Fake mutual fund advisor churning client accounts"),
+    ("Investment",         "Unlicensed forex trading platform with false returns"),
+    ("Job Offer",          "Part-time task fraud on fake rating platforms"),
+    ("Job Offer",          "Advance fee demanded for government job offer"),
+    ("Job Offer",          "Work-from-home data entry advance payment trap"),
+    ("Job Offer",          "Fake placement agency charging registration fees"),
+    ("Online Shopping",    "Non-delivery after UPI payment to fake seller"),
+    ("Online Shopping",    "Counterfeit goods sold as branded on social media"),
+    ("Online Shopping",    "OLX / second-hand marketplace QR code refund scam"),
+    ("Loan/Financial",     "Instant loan app with hidden processing fee trap"),
+    ("Loan/Financial",     "Fake DSA charging upfront insurance to disburse loan"),
+    ("Loan/Financial",     "Credit card reward point redemption phishing"),
     ("Pyramid Scheme/MLM", "Health product MLM with mandatory downline recruitment"),
     ("Pyramid Scheme/MLM", "Cryptocurrency MLM with token staking rewards"),
-    ("Other",            "Fake charity / PM relief fund collection after disaster"),
-    ("Other",            "Matrimonial profile fraud leading to money transfer"),
-    ("Other",            "Fake rental property advance payment scam"),
+    ("Other",              "Fake charity / PM relief fund collection after disaster"),
+    ("Other",              "Matrimonial profile fraud leading to money transfer"),
+    ("Other",              "Fake rental property advance payment scam"),
 ]
+
+# Trilingual structured schema for daily AI entries
+AI_DAILY_SCAM_ED_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "category":   {"type": "STRING"},
+        "title_en":   {"type": "STRING"},
+        "title_te":   {"type": "STRING"},
+        "title_hi":   {"type": "STRING"},
+        "story_en":   {"type": "STRING"},
+        "story_te":   {"type": "STRING"},
+        "story_hi":   {"type": "STRING"},
+        "remedies_en": {
+            "type": "OBJECT",
+            "properties": {
+                "before": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "during": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "after":  {"type": "ARRAY", "items": {"type": "STRING"}},
+            }
+        },
+        "remedies_te": {
+            "type": "OBJECT",
+            "properties": {
+                "before": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "during": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "after":  {"type": "ARRAY", "items": {"type": "STRING"}},
+            }
+        },
+        "remedies_hi": {
+            "type": "OBJECT",
+            "properties": {
+                "before": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "during": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "after":  {"type": "ARRAY", "items": {"type": "STRING"}},
+            }
+        },
+        "source_note": {"type": "STRING"},
+    },
+    "required": [
+        "category",
+        "title_en", "title_te", "title_hi",
+        "story_en", "story_te", "story_hi",
+        "remedies_en", "remedies_te", "remedies_hi",
+        "source_note",
+    ]
+}
+
+# Lightweight schema for duplicate-topic judgment
+AI_DUP_CHECK_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "is_duplicate":   {"type": "BOOLEAN"},
+        "matching_title": {"type": "STRING"},
+    },
+    "required": ["is_duplicate", "matching_title"]
+}
 
 
 def pick_ai_scam_topic(today_str, pending_entries):
-    import hashlib
     recent_labels = set()
     ai_entries = [e for e in pending_entries if e.get("origin") == "ai_generated"]
     for e in ai_entries[-30:]:
-        recent_labels.add(e.get("title", "")[:40])
+        key = (e.get("title_en") or e.get("title") or "")[:40]
+        recent_labels.add(key)
 
     seed = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
     for offset in range(len(AI_SCAM_TOPICS)):
@@ -2296,92 +2352,224 @@ def pick_ai_scam_topic(today_str, pending_entries):
         category, label = AI_SCAM_TOPICS[idx]
         if label[:40] not in recent_labels:
             return category, label
-    category, label = AI_SCAM_TOPICS[seed % len(AI_SCAM_TOPICS)]
-    return category, label
+    return AI_SCAM_TOPICS[seed % len(AI_SCAM_TOPICS)]
 
 
-def build_ai_scam_ed_prompt(category, topic_label):
-    return f"""You are a consumer protection writer for an Indian legal-aid platform.
+def prefilter_duplicate_candidates(topic_label, category, all_entries):
+    stopwords = {
+        "a", "an", "the", "and", "or", "of", "in", "on", "at", "to",
+        "for", "via", "with", "from", "by", "fake", "fraud", "scam",
+        "using", "how", "your",
+    }
+    topic_words = {
+        w.lower() for w in re.split(r"\W+", topic_label)
+        if len(w) > 2 and w.lower() not in stopwords
+    }
+    candidates = []
+    for e in all_entries:
+        if e.get("category") != category:
+            continue
+        title = e.get("title_en") or e.get("title") or ""
+        title_words = {
+            w.lower() for w in re.split(r"\W+", title)
+            if len(w) > 2 and w.lower() not in stopwords
+        }
+        if len(topic_words & title_words) >= 2:
+            candidates.append(e)
+    return candidates
 
-Write a scam awareness entry about: "{topic_label}" (category: {category}).
 
-Use only well-documented, publicly reported information about this type of fraud in India.
-Do not name any specific company, individual, or app unless it is a government body or regulator.
-Write in plain simple English that a first-time smartphone user can understand.
-Be generous with depth — this is the only entry published today and readers rely on it.
+def check_duplicate_with_gemini(gemini_key, topic_label, candidate_titles):
+    titles_list = "\n".join(f"- {t}" for t in candidate_titles)
+    prompt = (
+        f'Proposed new topic: "{topic_label}"\n\n'
+        f"Already in the database:\n{titles_list}\n\n"
+        "Are these describing the SAME underlying scam mechanism? "
+        "Duplicates share the same method — not just the same broad category. "
+        "If duplicate, set is_duplicate true and matching_title to the exact matching title. "
+        "If genuinely different, set is_duplicate false and matching_title empty."
+    )
+    try:
+        return call_gemini_structured(
+            gemini_key, prompt, AI_DUP_CHECK_SCHEMA, max_tokens=80
+        )
+    except Exception:
+        return {"is_duplicate": False, "matching_title": ""}
 
-Return a JSON object with exactly these fields:
 
-category: one of {SCAMED_CATEGORIES}
-title: a specific, vivid headline (max 15 words) describing what victims actually experience
-anonymized_story: 3–4 paragraphs. First: how the scam typically starts. Second: how it escalates. Third/fourth: what victims usually discover too late.
-remedy_advice: 4–6 paragraphs covering BEFORE (how to avoid), DURING (what to do if you're mid-scam), and AFTER (reporting steps: 1930 helpline, cybercrime.gov.in, FIR, bank recall). Include the relevant section of IT Act 2000, BNS/IPC, or SEBI/RBI regulation that applies.
+def increment_reported_count(report_id, pending, pending_sha,
+                              public_data, public_sha, site_token):
+    for e in pending.get("entries", []):
+        if e.get("id") == report_id:
+            e["reported_count"] = e.get("reported_count", 1) + 1
+            github_put(PENDING_FILE, site_token, pending, pending_sha,
+                       f"Bump reported_count {report_id}", timeout=8)
+            return
+    for e in public_data.get("entries", []):
+        if e.get("id") == report_id:
+            e["reported_count"] = e.get("reported_count", 1) + 1
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha,
+                       f"Bump reported_count {report_id}", timeout=8)
+            return
 
-Write as a trusted friend who has seen this happen, not as a legal document."""
+
+def build_ai_scam_ed_prompt_v2(category, topic_label):
+    return f"""You are writing scam awareness content for LawSticker AI, an Indian legal-aid platform. This entry is published in English, Telugu, and Hindi simultaneously.
+
+TOPIC: "{topic_label}"
+CATEGORY: {category}
+
+RULES:
+- Real names of government bodies, regulators (RBI, TRAI, SEBI, MHA, NCPCR), and well-documented public cases ARE allowed — this is public-domain awareness content, not a personal claim.
+- Do NOT name or imply claims against any private individual or unlisted business.
+- For source references: do NOT invent URLs or article titles. Use generic descriptions only: e.g. "widely reported in Indian media in July 2025", "flagged in RBI circular 2024", "documented in TRAI advisory 2023".
+- Write at the level of a first-time smartphone user. No legal jargon.
+- Be generous with depth — one entry per day, readers depend on it.
+
+Generate ALL fields in ALL THREE languages in a single response:
+
+title_en / title_te / title_hi
+  A vivid, specific headline (max 15 words) describing what victims actually experience.
+
+story_en / story_te / story_hi
+  3–4 paragraphs:
+  Para 1 — The hook: how does the scammer first make contact?
+  Para 2 — The escalation: what happens once the victim engages?
+  Para 3-4 — The discovery: what victims realise too late, and the real-world impact.
+
+remedies_en / remedies_te / remedies_hi
+  A structured object with three arrays of plain numbered steps (no markdown, no asterisks):
+  before: 3–5 steps to prevent falling for this scam
+  during: 2–4 steps if you are mid-scam right now
+  after:  3–5 recovery steps — MUST include 1930 Cybercrime Helpline, cybercrime.gov.in, bank fraud dispute, FIR, and the specific IT Act 2000 / BNS 2023 section that applies
+
+source_note
+  One sentence describing where this pattern is documented (generic, no invented links).
+
+category
+  Must be one of: {SCAMED_CATEGORIES}
+
+Write Telugu and Hindi as genuine translations — proper sentences in the correct script, never transliteration."""
 
 
 @app.route('/api/daily-scam-ed', methods=['GET'])
 def daily_scam_ed():
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    bot_token  = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id    = os.environ.get("TELEGRAM_CHAT_ID")
     if not site_token or not gemini_key:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
     try:
         today_str = datetime.now(timezone.utc).date().isoformat()
 
-        pending, sha = github_get(PENDING_FILE, site_token, timeout=8)
+        pending, pending_sha = github_get(PENDING_FILE, site_token, timeout=8)
         if pending is None:
             pending = {"entries": []}
-        entries = pending.get("entries", [])
+        pending_entries = pending.get("entries", [])
 
-        # Idempotent guard — skip if already generated today
-        for e in entries:
+        # Idempotent guard
+        for e in pending_entries:
             if e.get("origin") == "ai_generated" and e.get("origin_date") == today_str:
-                return jsonify({"ok": True, "skipped": True, "reason": "Already generated for today.", "ref": e.get("ref_number", "")})
+                return jsonify({"ok": True, "skipped": True,
+                                "reason": "Already generated for today.",
+                                "ref": e.get("ref_number", "")})
 
-        category, topic_label = pick_ai_scam_topic(today_str, entries)
-        prompt = build_ai_scam_ed_prompt(category, topic_label)
-
+        # Load public file for duplicate check
         try:
-            parsed = call_gemini_structured(gemini_key, prompt, SCAMED_RESPONSE_SCHEMA, max_tokens=1800)
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode()
-            return jsonify({"ok": False, "error": f"Gemini error {e.code}: {error_body[:200]}"}), 502
+            public_data, public_sha = github_get(PUBLIC_FILE, site_token, timeout=8)
+            if public_data is None:
+                public_data = {"entries": []}
+        except Exception:
+            public_data, public_sha = {"entries": []}, None
 
-        if not parsed or not parsed.get("anonymized_story"):
-            return jsonify({"ok": False, "error": "Gemini returned an empty or invalid response."}), 502
+        all_entries = pending_entries + public_data.get("entries", [])
+        category, topic_label = pick_ai_scam_topic(today_str, pending_entries)
+
+        # Step 1: cheap Python prefilter
+        candidates = prefilter_duplicate_candidates(topic_label, category, all_entries)
+
+        # Step 2: Gemini duplicate judgment (only when prefilter found candidates)
+        if candidates:
+            candidate_titles = [
+                e.get("title_en") or e.get("title", "") for e in candidates
+            ]
+            dup = check_duplicate_with_gemini(gemini_key, topic_label, candidate_titles)
+            if dup.get("is_duplicate"):
+                matched_title = dup.get("matching_title", "")
+                matched_entry = next(
+                    (e for e in candidates
+                     if (e.get("title_en") or e.get("title", "")) == matched_title),
+                    candidates[0]
+                )
+                increment_reported_count(
+                    matched_entry["id"],
+                    pending, pending_sha,
+                    public_data, public_sha,
+                    site_token,
+                )
+                return jsonify({"ok": True, "skipped": True,
+                                "reason": "Duplicate — reported_count incremented.",
+                                "matched": matched_title})
+
+        # Step 3: Generate full trilingual entry
+        prompt = build_ai_scam_ed_prompt_v2(category, topic_label)
+        try:
+            parsed = call_gemini_structured(
+                gemini_key, prompt, AI_DAILY_SCAM_ED_SCHEMA, max_tokens=4000
+            )
+        except urllib.error.HTTPError as he:
+            body = he.read().decode()
+            return jsonify({"ok": False, "error": f"Gemini error {he.code}: {body[:200]}"}), 502
+
+        if not parsed or not parsed.get("story_en"):
+            return jsonify({"ok": False,
+                            "error": "Gemini returned an empty or invalid response."}), 502
 
         internal_id = f"scam-ai-{int(datetime.now(timezone.utc).timestamp())}"
-        ref_number = "AI-" + today_str.replace("-", "")[2:]  # e.g. AI-260801
+        ref_number  = "AI-" + today_str.replace("-", "")[2:]
 
-        entries.append({
-            "id": internal_id,
-            "ref_number": ref_number,
-            "category": parsed["category"],
-            "title": parsed["title"],
-            "anonymized_story": parsed["anonymized_story"],
-            "remedy_advice": parsed.get("remedy_advice", ""),
-            "lang": "en",
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-            "origin": "ai_generated",
-            "origin_date": today_str,
-            "status": "pending",
+        pending_entries.append({
+            "id":               internal_id,
+            "ref_number":       ref_number,
+            "category":         parsed["category"],
+            "title_en":         parsed["title_en"],
+            "title_te":         parsed["title_te"],
+            "title_hi":         parsed["title_hi"],
+            "title":            parsed["title_en"],       # fallback for existing template
+            "story_en":         parsed["story_en"],
+            "story_te":         parsed["story_te"],
+            "story_hi":         parsed["story_hi"],
+            "anonymized_story": parsed["story_en"],       # fallback for existing template
+            "remedies": {
+                "en": parsed["remedies_en"],
+                "te": parsed["remedies_te"],
+                "hi": parsed["remedies_hi"],
+            },
+            "source_note":      parsed.get("source_note", ""),
+            "lang":             "en",
+            "submitted_at":     datetime.now(timezone.utc).isoformat(),
+            "origin":           "ai_generated",
+            "origin_date":      today_str,
+            "reported_count":   1,
+            "status":           "pending",
         })
-        pending["entries"] = entries[-500:]
-        github_put(PENDING_FILE, site_token, pending, sha, f"AI daily scam-ed entry {today_str}", timeout=10)
+        pending["entries"] = pending_entries[-500:]
+        github_put(PENDING_FILE, site_token, pending, pending_sha,
+                   f"AI daily scam-ed entry {today_str}", timeout=10)
 
         if bot_token and chat_id:
             try:
+                before_steps = parsed.get("remedies_en", {}).get("before", [])
                 alert_text = (
                     f"🤖 <b>Daily AI Scam Bulletin</b> ({ref_number})\n"
-                    f"Topic: <i>{topic_label}</i>\n"
-                    f"Category: {parsed['category']}\n\n"
-                    f"<b>Title:</b> {parsed['title']}\n\n"
-                    f"{parsed['anonymized_story'][:900]}\n\n"
-                    f"Tap below to approve or reject."
+                    f"Topic: <i>{topic_label}</i> · {parsed['category']}\n\n"
+                    f"<b>{parsed['title_en']}</b>\n\n"
+                    f"{parsed['story_en'][:600]}\n\n"
+                    f"<b>Prevention:</b>\n"
+                    + "\n".join(f"• {s}" for s in before_steps[:3])
+                    + "\n\nTap below to approve or reject."
                 )
                 for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
                     try:
@@ -2391,7 +2579,8 @@ def daily_scam_ed():
             except Exception:
                 pass
 
-        return jsonify({"ok": True, "ref_number": ref_number, "category": parsed["category"], "title": parsed["title"]})
+        return jsonify({"ok": True, "ref_number": ref_number,
+                        "category": parsed["category"], "title": parsed["title_en"]})
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
