@@ -1107,39 +1107,47 @@ ARCHIVE_FILE = "scam-reports-archived.json"
 ENRICH_SCHEMA = {
     "type": "object",
     "properties": {
-        "scam_type_label": {"type": "string", "description": "Short, well-known name for this scam pattern type, e.g. 'Pyramid Scheme / MLM Fraud'"},
-        "modus_operandi": {"type": "string", "description": "2-3 sentences on how this type of scam generically operates, based on well-known patterns"},
-        "red_flags": {"type": "array", "items": {"type": "string"}, "description": "3-5 short, practical warning signs to watch for"},
-        "relevant_laws": {"type": "array", "items": {"type": "string"}, "description": "Names of well-established Indian Acts/laws relevant to this scam type — ONLY Act names, never case citations"},
-        "prevalence_note": {"type": "string", "description": "One honest, qualitative sentence on how common/known this pattern is — no invented statistics"},
-        "supportive_note": {"type": "string", "description": "A brief, warm, reassuring message for both the person who experienced this and future readers"},
+        "scam_type_label":    {"type": "string", "description": "Short, well-known name for this scam pattern type, e.g. 'Pyramid Scheme / MLM Fraud'"},
+        "modus_operandi_en":  {"type": "string", "description": "2-3 sentences in English on how this scam type generically operates"},
+        "modus_operandi_te":  {"type": "string", "description": "Same content in Telugu — proper sentences in Telugu script, not transliteration"},
+        "modus_operandi_hi":  {"type": "string", "description": "Same content in Hindi — proper sentences in Devanagari script, not transliteration"},
+        "red_flags_en":       {"type": "array", "items": {"type": "string"}, "description": "3-5 short practical warning signs in English"},
+        "red_flags_te":       {"type": "array", "items": {"type": "string"}, "description": "Same warning signs in Telugu script"},
+        "red_flags_hi":       {"type": "array", "items": {"type": "string"}, "description": "Same warning signs in Hindi/Devanagari script"},
+        "relevant_laws":      {"type": "array", "items": {"type": "string"}, "description": "Names of well-established Indian Acts/laws — ONLY Act names, never case citations"},
+        "prevalence_note":    {"type": "string", "description": "One honest, qualitative sentence on how common this pattern is — no invented statistics"},
+        "supportive_note":    {"type": "string", "description": "A brief, warm, reassuring message for both the person who experienced this and future readers"},
     },
-    "required": ["scam_type_label", "modus_operandi", "red_flags", "relevant_laws", "prevalence_note", "supportive_note"],
+    "required": [
+        "scam_type_label",
+        "modus_operandi_en", "modus_operandi_te", "modus_operandi_hi",
+        "red_flags_en", "red_flags_te", "red_flags_hi",
+        "relevant_laws", "prevalence_note", "supportive_note",
+    ],
 }
 
 
 def call_gemini_enrichment(api_key, category, anonymized_story, lang):
-    lang_names = {"en": "English", "te": "Telugu", "hi": "Hindi"}
     prompt = f"""You are enriching an approved, anonymized scam report for LawSticker AI's public "Scam Stories & Remedies" education page — a real person will read this to learn and feel supported.
 
 Category: {category}
 Story: {anonymized_story}
 
-Produce, in {lang_names.get(lang, "English")}:
-- scam_type_label: the well-known name for this pattern (e.g. "Pyramid Scheme / MLM Fraud", "Phishing / OTP Scam")
-- modus_operandi: how scams of this general type typically work — genuinely informative, not vague
-- red_flags: 3-5 concrete, practical warning signs
-- relevant_laws: ONLY the names of well-established Indian Acts/laws relevant to this scam type (e.g. "Consumer Protection Act 2019", "Prize Chits and Money Circulation Schemes (Banning) Act 1978", "Information Technology Act 2000"). Do NOT cite specific court cases, judgments, or rulings — those cannot be verified here and must never be invented.
-- prevalence_note: one honest, qualitative sentence on how commonly this pattern is reported — do not invent statistics or percentages
-- supportive_note: warm, genuine reassurance — for the person who went through this, and for anyone reading this to learn
+Produce ALL fields in ALL THREE languages in a single response:
 
-Stay factual and general. If you're not confident about a specific law applying, leave it out rather than guess.
-Use simple, everyday language a common person can easily understand — avoid formal or academic wording throughout."""
+- scam_type_label: the well-known name for this pattern in English (e.g. "Pyramid Scheme / MLM Fraud")
+- modus_operandi_en / modus_operandi_te / modus_operandi_hi: 2-3 sentences on how this scam type typically operates — genuine translations in proper Telugu script and Devanagari, never transliteration
+- red_flags_en / red_flags_te / red_flags_hi: 3-5 concrete, practical warning signs — genuine translations in proper script for each language
+- relevant_laws: ONLY the names of well-established Indian Acts/laws (e.g. "Consumer Protection Act 2019", "IT Act 2000"). Law names stay in English. Do NOT cite court cases or rulings.
+- prevalence_note: one honest, qualitative sentence on how commonly this pattern is reported — no invented statistics
+- supportive_note: warm, genuine reassurance for the person who went through this and future readers
+
+Stay factual and general. Use simple, everyday language. If you're not confident a law applies, omit it rather than guess."""
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "maxOutputTokens": 700,
+            "maxOutputTokens": 1200,
             "responseMimeType": "application/json",
             "responseSchema": ENRICH_SCHEMA,
         },
@@ -1150,7 +1158,7 @@ Use simple, everyday language a common person can easily understand — avoid fo
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=20) as resp:
         result = json.loads(resp.read().decode())
     try:
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
