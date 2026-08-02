@@ -2586,6 +2586,87 @@ def daily_scam_ed():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+TRANSLATE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title_te": {"type": "STRING"},
+        "title_hi": {"type": "STRING"},
+        "story_te": {"type": "STRING"},
+        "story_hi": {"type": "STRING"},
+    },
+    "required": ["title_te", "title_hi", "story_te", "story_hi"],
+}
+
+
+@app.route('/api/backfill-translations', methods=['GET'])
+def backfill_translations():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        public_data, public_sha = github_get(PUBLIC_FILE, site_token, timeout=10)
+        if not public_data:
+            return jsonify({"ok": False, "error": "Could not read public file."}), 500
+
+        entries = public_data.get("entries", [])
+        translated = 0
+        skipped = 0
+        errors = []
+
+        for entry in entries:
+            if entry.get("title_te") and entry.get("title_hi"):
+                skipped += 1
+                continue
+
+            title_en = entry.get("title") or ""
+            story_en = entry.get("anonymized_story") or ""
+            if not title_en or not story_en:
+                skipped += 1
+                continue
+
+            prompt = (
+                f'Translate this scam story from English into Telugu and Hindi.\n\n'
+                f'Title (EN): {title_en}\n\n'
+                f'Story (EN): {story_en}\n\n'
+                f'Output title_te, title_hi, story_te, story_hi.\n'
+                f'Use proper Telugu and Hindi script — never transliteration.\n'
+                f'Preserve the full length and meaning of the story in both languages.'
+            )
+            try:
+                parsed = call_gemini_structured(
+                    gemini_key, prompt, TRANSLATE_SCHEMA, max_tokens=2000
+                )
+                if parsed and parsed.get("title_te"):
+                    entry["title_en"]  = title_en
+                    entry["title_te"]  = parsed["title_te"]
+                    entry["title_hi"]  = parsed["title_hi"]
+                    entry["story_en"]  = story_en
+                    entry["story_te"]  = parsed["story_te"]
+                    entry["story_hi"]  = parsed["story_hi"]
+                    translated += 1
+                else:
+                    errors.append(entry.get("id", "?") + ": empty Gemini response")
+            except Exception as ex:
+                errors.append(entry.get("id", "?") + ": " + str(ex))
+
+        if translated:
+            public_data["entries"] = entries
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha,
+                       f"Backfill translations for {translated} entries", timeout=12)
+
+        return jsonify({
+            "ok": True,
+            "translated": translated,
+            "skipped": skipped,
+            "errors": errors,
+        })
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
 
