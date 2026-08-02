@@ -1208,26 +1208,25 @@ def process_scam_decision(report_id, action, site_token):
                 public_data = {"entries": []}
         except Exception:
             public_data, public_sha = {"entries": []}, None
+        # Copy every field from pending except raw user data and internal status.
+        # This preserves all trilingual fields (title_en/te/hi, story_en/te/hi,
+        # remedies.en/te/hi, source_note, topic_label, etc.) whatever the
+        # generator wrote — no hardcoded field list that silently drops new fields.
+        _private = {"original_story", "structured_fields", "status"}
+        public_entry = {k: v for k, v in target.items() if k not in _private}
+        public_entry["status"] = "approved"
+        public_entry["approved_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Signals block for user-submitted entries (structured_fields → signals)
         src_fields = target.get("structured_fields", {})
-        public_entry = {
-            "id": target["id"],
-            "ref_number": target.get("ref_number", ""),
-            "category": target["category"],
-            "title": target["title"],
-            "anonymized_story": target["anonymized_story"],
-            "signals": {
+        if src_fields:
+            public_entry["signals"] = {
                 "contact_method": src_fields.get("contact_method", ""),
                 "ask_action": src_fields.get("ask_action", ""),
                 "cost_items": src_fields.get("cost_items", []),
                 "money_range": src_fields.get("money_range", ""),
-            },
-            "lang": target.get("lang", "en"),
-            "status": "approved",
-            "submitted_at": target.get("submitted_at", ""),
-            "approved_at": datetime.now(timezone.utc).isoformat(),
-            "origin": target.get("origin", "user_submitted"),
-            "origin_date": target.get("origin_date", ""),
-        }
+            }
+
         if enrichment:
             public_entry["enrichment"] = enrichment
         public_data.setdefault("entries", []).append(public_entry)
