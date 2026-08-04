@@ -2691,6 +2691,61 @@ def backfill_translations():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# YouTube Stats — cron-triggered ONCE PER DAY only. Fetches real subscriber
+# and video counts from YouTube's public Data API (read-only, no OAuth
+# needed for public channel stats) and caches to a file, same pattern as
+# news/quiz/social card. Homepage reads the cache, never calls YouTube
+# directly on a page visit.
+# ---------------------------------------------------------------------------
+
+YT_STATS_FILE = "youtube-stats.json"
+YT_CHANNEL_HANDLE = "lawstickerai"
+
+
+@app.route('/api/youtube-stats', methods=['GET'])
+def youtube_stats():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    yt_key = os.environ.get("YOUTUBE_API_KEY")
+    if not site_token or not yt_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration — missing YOUTUBE_API_KEY."}), 500
+
+    try:
+        url = (
+            "https://www.googleapis.com/youtube/v3/channels"
+            f"?part=statistics&forHandle={YT_CHANNEL_HANDLE}&key={yt_key}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "lawsticker-ai-cron/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+
+        items = data.get("items", [])
+        if not items:
+            return jsonify({"ok": False, "error": "Channel not found for handle.", "raw": data}), 500
+
+        stats = items[0]["statistics"]
+        output = {
+            "subscriber_count": int(stats.get("subscriberCount", 0)),
+            "video_count": int(stats.get("videoCount", 0)),
+            "view_count": int(stats.get("viewCount", 0)),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            _, sha = github_get(YT_STATS_FILE, site_token, timeout=5)
+        except Exception:
+            sha = None
+        github_put(YT_STATS_FILE, site_token, output, sha, "Daily YouTube stats refresh", timeout=8)
+
+        return jsonify({"ok": True, "stats": output})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Health check — visit this URL directly in your phone's browser to confirm
 # the whole service deployed and is running, before testing individual routes.
 # ---------------------------------------------------------------------------
 
@@ -2703,7 +2758,7 @@ def health():
         "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz",
         "/api/telegram-webhook", "/api/daily-social-card",
         "/api/daily-sc-digest", "/api/sc-digest-data",
-        "/api/daily-scam-ed",
+        "/api/daily-scam-ed", "/api/youtube-stats",
     ]})
 
 
