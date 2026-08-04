@@ -2475,6 +2475,149 @@ AI_DUP_CHECK_SCHEMA = {
 
 N_PER_DAY = 3  # AI stories generated per cron run
 
+TRICKS_FILE = "marketing-tricks.json"
+
+MARKETING_TRICK_TOPICS = [
+    "Mall/cinema kiosk charging above the MRP printed on a sealed bottled water",
+    "Dual MRP - same product printed with a higher price for malls/cinemas/airports than regular shops",
+    "Restaurant adding a 'service charge' as if it were mandatory GST",
+    "Fake discount tags - inflated 'original price' crossed out to make a normal price look like a bargain",
+    "E-commerce dark pattern - a pre-ticked add-on or insurance silently added at checkout",
+    "Countdown timer or 'only 2 left' urgency messages that reset or are fake",
+    "Weighing scale or quantity shortchanging at local vendors and petrol pumps",
+    "Negative-option billing - free trial silently converting into a paid auto-renewing subscription",
+    "'No-cost EMI' that hides a processing fee or inflated product price to cover the interest",
+    "Mall/multiplex parking charging beyond the legally mandated free grace period",
+    "Buy-1-get-1 offers where the MRP is quietly inflated to cover the 'free' item",
+    "Extended warranty upsell using scare tactics about a product breaking down",
+    "Local shopkeeper insisting a product is 'non-returnable/non-refundable' when the packaging says otherwise",
+    "Cashback that lands in a locked wallet balance instead of the bank account",
+    "Festival/limited-edition packaging used to justify a price hike on an everyday product",
+    "Coaching centre or gym locking students into a long-term contract with no cooling-off refund",
+    "Hidden convenience fee added only at the final payment step of ticket/food delivery apps",
+    "Loose branded item (e.g. sweets, snacks) sold without any MRP/price disclosure at the counter",
+    "Currency exchange or forex counters at airports quoting a rate far off the actual market rate",
+    "Real estate broker or builder demanding cash 'token amount' with no receipt",
+]
+
+MARKETING_TRICK_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "category":          {"type": "STRING"},
+        "trick_title_en":    {"type": "STRING"},
+        "trick_title_te":    {"type": "STRING"},
+        "trick_title_hi":    {"type": "STRING"},
+        "trick_explain_en":  {"type": "STRING"},
+        "trick_explain_te":  {"type": "STRING"},
+        "trick_explain_hi":  {"type": "STRING"},
+        "smart_response_en": {"type": "STRING"},
+        "smart_response_te": {"type": "STRING"},
+        "smart_response_hi": {"type": "STRING"},
+        "share_line_en":     {"type": "STRING"},
+        "legal_note_en":     {"type": "STRING"},
+    },
+    "required": [
+        "category",
+        "trick_title_en", "trick_title_te", "trick_title_hi",
+        "trick_explain_en", "trick_explain_te", "trick_explain_hi",
+        "smart_response_en", "smart_response_te", "smart_response_hi",
+        "share_line_en", "legal_note_en",
+    ],
+}
+
+
+def build_marketing_trick_prompt(topic_label):
+    return f"""Write today's "Smart Shopper" card for LawSticker AI — a daily feature that exposes one everyday commercial trick businesses in India use on customers, and gives a short, confident, ready-to-say response.
+
+TOPIC: "{topic_label}"
+
+This is NOT a scam or fraud story — it's a common, usually-legal-adjacent-but-unfair commercial practice ordinary shoppers face (overcharging, dark patterns, pressure tactics, hidden fees). Do not name any specific real company, brand, or business — describe the pattern generically ("a mall kiosk", "an online store", "a local vendor") since this is general consumer education, not a report about anyone in particular.
+
+Generate ALL fields in a single response:
+
+category — short label, e.g. "Overcharging", "Dark Pattern", "Hidden Fee", "Fake Urgency", "Bundling Trick"
+trick_title_en/te/hi — punchy, specific headline naming the trick (max 12 words) — should make someone stop scrolling
+trick_explain_en/te/hi — 2 short paragraphs: what the business does and why it works on people psychologically or practically. Plain language, no jargon.
+smart_response_en/te/hi — a SHORT, confident, word-for-word script (1-3 sentences) the person can literally say or do in the moment to push back. Must be realistic and non-confrontational, something an ordinary person would actually say.
+share_line_en — ONE punchy sentence (under 20 words) written for a WhatsApp status or Instagram caption — should make people want to forward it. No hashtags.
+legal_note_en — ONE sentence citing the relevant Indian law/rule ONLY if one genuinely, specifically applies (e.g. Legal Metrology (Packaged Commodities) Rules 2011 for MRP, Consumer Protection Act 2019 for unfair trade practice, RBI guidelines for EMI/loan practices). If no specific law applies, say "This is a business practice, not necessarily illegal — but you can still push back."
+
+Write Telugu and Hindi as genuine translations in proper script, never transliteration."""
+
+
+def daily_marketing_trick_already_done(entries, today_str):
+    return any(e.get("origin_date") == today_str for e in entries)
+
+
+@app.route('/api/daily-marketing-trick', methods=['GET'])
+def daily_marketing_trick():
+    # Same fully-automatic philosophy as scam stories, but lighter:
+    # one card a day, no grounding needed since these are generic,
+    # well-known commercial patterns (not claims about anyone specific),
+    # so no defamation exposure and no search-grounding cost.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        today_str = datetime.now(timezone.utc).date().isoformat()
+
+        try:
+            data, sha = github_get(TRICKS_FILE, site_token, timeout=8)
+            if data is None:
+                data = {"entries": []}
+        except Exception:
+            data, sha = {"entries": []}, None
+
+        entries = data.get("entries", [])
+        if daily_marketing_trick_already_done(entries, today_str):
+            return jsonify({"ok": True, "skipped": True, "reason": "Already published today's trick."})
+
+        used_topics = {e.get("topic_label") for e in entries[-len(MARKETING_TRICK_TOPICS):]}
+        candidates = [t for t in MARKETING_TRICK_TOPICS if t not in used_topics] or MARKETING_TRICK_TOPICS
+        # Deterministic-ish daily rotation rather than random, so runs are reproducible if retried same day
+        topic_label = candidates[int(datetime.now(timezone.utc).timestamp() // 86400) % len(candidates)]
+
+        prompt = build_marketing_trick_prompt(topic_label)
+        try:
+            parsed = call_gemini_structured(gemini_key, prompt, MARKETING_TRICK_SCHEMA, max_tokens=2500)
+        except urllib.error.HTTPError as he:
+            body = he.read().decode()
+            return jsonify({"ok": False, "error": f"Gemini error {he.code}: {body[:200]}"}), 502
+
+        if not parsed or not parsed.get("trick_title_en"):
+            return jsonify({"ok": False, "error": "Generation failed."}), 502
+
+        entry = {
+            "id":            f"trick-{int(datetime.now(timezone.utc).timestamp())}",
+            "topic_label":   topic_label,
+            "category":      parsed["category"],
+            "title_en":      parsed["trick_title_en"],
+            "title_te":      parsed["trick_title_te"],
+            "title_hi":      parsed["trick_title_hi"],
+            "explain_en":    parsed["trick_explain_en"],
+            "explain_te":    parsed["trick_explain_te"],
+            "explain_hi":    parsed["trick_explain_hi"],
+            "response_en":   parsed["smart_response_en"],
+            "response_te":   parsed["smart_response_te"],
+            "response_hi":   parsed["smart_response_hi"],
+            "share_line":    parsed["share_line_en"],
+            "legal_note":    parsed["legal_note_en"],
+            "origin":        "ai_generated",
+            "origin_date":   today_str,
+            "created_at":    datetime.now(timezone.utc).isoformat(),
+        }
+        entries.append(entry)
+        data["entries"] = entries[-300:]
+        github_put(TRICKS_FILE, site_token, data, sha,
+                   f"Daily marketing trick {today_str}: {topic_label[:60]}", timeout=15)
+
+        return jsonify({"ok": True, "entry": {"title": entry["title_en"], "category": entry["category"]}})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 def pick_ai_scam_topic(today_str, pending_entries, skip_topics=None):
     skip_topics = skip_topics or set()
