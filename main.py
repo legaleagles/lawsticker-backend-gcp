@@ -1104,6 +1104,19 @@ def filter_relevant_entries_scamed(text, entries, max_entries=8):
 PUBLIC_FILE = "scam-reports.json"
 ARCHIVE_FILE = "scam-reports-archived.json"
 
+_YOUTUBE_ID_RE = re.compile(
+    r'(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})'
+)
+
+
+def extract_youtube_id(url):
+    # Accepts full watch URLs, youtu.be short links, and Shorts links.
+    # Returns just the 11-char video ID, or None if it doesn't look like YouTube.
+    if not url:
+        return None
+    m = _YOUTUBE_ID_RE.search(url.strip())
+    return m.group(1) if m else None
+
 ENRICH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1334,6 +1347,31 @@ def scam_moderate():
                 public_data, public_sha = {"entries": []}, None
             public_data.setdefault("entries", []).append(entry)
             github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Restore scam story to public")
+            return jsonify({"ok": True})
+
+        if action == "set_video_url":
+            raw_url = (body.get("video_url") or "").strip()
+            video_id = extract_youtube_id(raw_url) if raw_url else None
+            if raw_url and not video_id:
+                return jsonify({"ok": False, "error": "That doesn't look like a valid YouTube link."}), 400
+
+            public_data, public_sha = github_get(PUBLIC_FILE, site_token)
+            entry = None
+            for e in (public_data or {}).get("entries", []):
+                if e.get("id") == report_id:
+                    entry = e
+                    break
+            if not entry:
+                return jsonify({"ok": False, "error": "Published story not found."}), 404
+
+            if video_id:
+                entry["video_url"] = raw_url
+                entry["video_id"] = video_id
+            else:
+                # Empty submission clears an existing video link
+                entry.pop("video_url", None)
+                entry.pop("video_id", None)
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha, "Set scam story video URL")
             return jsonify({"ok": True})
 
         result = process_scam_decision(report_id, action, site_token)
