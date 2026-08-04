@@ -658,6 +658,86 @@ def call_gemini_structured(api_key, prompt, schema, max_tokens=600):
     return json.loads(raw_text)
 
 
+def call_gemini_grounded(api_key, prompt, max_tokens=1500):
+    # Phase 1 of the scam-story pipeline: a real Google-Search-grounded call.
+    # Structured output (responseSchema) cannot be combined with the
+    # google_search tool on this model, so this returns free text plus
+    # the REAL source URLs from groundingMetadata — never a URL the model
+    # might have typed itself, which could be invented.
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"maxOutputTokens": max_tokens},
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        result = json.loads(resp.read().decode())
+
+    candidate = (result.get("candidates") or [{}])[0]
+    parts = candidate.get("content", {}).get("parts", [])
+    raw_text = "".join(p.get("text", "") for p in parts)
+
+    source_urls = []
+    grounding = candidate.get("groundingMetadata", {})
+    for chunk in grounding.get("groundingChunks", []):
+        uri = chunk.get("web", {}).get("uri")
+        title = chunk.get("web", {}).get("title", "")
+        if uri:
+            source_urls.append({"uri": uri, "title": title})
+
+    return raw_text, source_urls
+
+
+def build_grounded_search_prompt(category, topic_label):
+    return f"""Search for a REAL, recent (last 12 months if possible) news article, government advisory, or consumer-forum report documenting an actual case of this scam pattern in India:
+
+TOPIC: "{topic_label}"
+CATEGORY: {category}
+
+Find one concrete, real, publicly reported case or well-documented pattern. Report back in plain text:
+1. What happened — real specifics from the source (names of companies/apps/platforms involved ARE fine if the source names them; this is public-interest reporting on a published source, not a new accusation).
+2. How the scam mechanism worked, step by step.
+3. What the outcome/impact was, per the source.
+4. The exact source you found this in (publication name, and mention there IS a URL — the citation will be attached separately).
+
+If you cannot find a real, verifiable case for this specific topic, say clearly "NO VERIFIABLE SOURCE FOUND" and nothing else."""
+
+
+def extract_scam_story_from_grounded_text(api_key, grounded_text, category, topic_label):
+    prompt = f"""Below is real, source-grounded research about a scam pattern in India. Turn it into structured public-education content for LawSticker AI's Scam Stories page.
+
+RESEARCH:
+{grounded_text}
+
+TOPIC: {topic_label}
+CATEGORY: {category}
+
+RULES:
+- Use the real specifics from the research above — names of companies, apps, platforms, or public figures that the research itself names ARE fine to keep, since this repackages an already-published source, not a new claim. Do NOT invent any name, number, or detail not present in the research.
+- Do NOT invent source URLs or article titles yourself — a real source citation will be attached separately from search grounding.
+- Write at the level of a first-time smartphone user. No legal jargon.
+
+Generate ALL fields in ALL THREE languages in a single response:
+
+title_en / title_te / title_hi — vivid, specific headline (max 15 words)
+story_en / story_te / story_hi — 3-4 paragraphs: the hook, the escalation, the discovery/impact, grounded in the research above
+remedies_en / remedies_te / remedies_hi — structured object with three arrays of plain numbered steps (no markdown):
+  before: 3-5 prevention steps
+  during: 2-4 steps if mid-scam right now
+  after: 3-5 recovery steps — MUST include 1930 Cybercrime Helpline, cybercrime.gov.in, bank fraud dispute, FIR, and the specific IT Act 2000 / BNS 2023 section that applies
+source_note — one sentence describing what kind of source this came from (e.g. "Reported by [outlet type] in [timeframe]")
+category — must be one of: {SCAMED_CATEGORIES}
+
+Write Telugu and Hindi as genuine translations — proper sentences in the correct script, never transliteration."""
+
+    return call_gemini_structured(api_key, prompt, AI_DAILY_SCAM_ED_SCHEMA, max_tokens=4000)
+
+
 GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 
@@ -981,6 +1061,15 @@ USER'S SUBMISSION:
 
 @app.route('/api/scam-ed', methods=['POST'])
 def scam_ed():
+    # Public reader submission retired — Scam Stories is now fully
+    # AI-sourced (grounded + published by /api/daily-scam-ed). Route kept,
+    # neutered, rather than removed, so nothing 404s if anything old
+    # still points here.
+    return jsonify({
+        "ok": False,
+        "error": "Reader scam reporting has been retired. Scam Stories is now sourced automatically by AI each day — see lawsticker-ai.com/scam-stories.html"
+    }), 410
+
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not site_token or not gemini_key:
@@ -2505,6 +2594,11 @@ Write Telugu and Hindi as genuine translations — proper sentences in the corre
 
 @app.route('/api/daily-scam-ed', methods=['GET'])
 def daily_scam_ed():
+    # Fully automatic pipeline: no pending queue, no Telegram approval.
+    # Each story must come from a real, Google-Search-grounded source with
+    # a real URL (taken from groundingMetadata, never model-typed text)
+    # before it's allowed to publish. No source found = that slot is
+    # skipped for today, nothing fabricated goes live.
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     bot_token  = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -2515,22 +2609,6 @@ def daily_scam_ed():
     try:
         today_str = datetime.now(timezone.utc).date().isoformat()
 
-        pending, pending_sha = github_get(PENDING_FILE, site_token, timeout=8)
-        if pending is None:
-            pending = {"entries": []}
-        pending_entries = pending.get("entries", [])
-
-        # Count how many AI entries already exist for today
-        today_ai = [
-            e for e in pending_entries
-            if e.get("origin") == "ai_generated" and e.get("origin_date") == today_str
-        ]
-        slots_remaining = N_PER_DAY - len(today_ai)
-        if slots_remaining <= 0:
-            return jsonify({"ok": True, "skipped": True,
-                            "reason": f"Already generated {N_PER_DAY} entries for today."})
-
-        # Load public file for duplicate check (one fetch, used across all iterations)
         try:
             public_data, public_sha = github_get(PUBLIC_FILE, site_token, timeout=8)
             if public_data is None:
@@ -2538,31 +2616,53 @@ def daily_scam_ed():
         except Exception:
             public_data, public_sha = {"entries": []}, None
 
-        generated = []   # list of (entry_dict, parsed, topic_label, ref_number)
+        public_entries = public_data.get("entries", [])
+        today_ai = [
+            e for e in public_entries
+            if e.get("origin") == "ai_generated" and e.get("origin_date") == today_str
+        ]
+        slots_remaining = N_PER_DAY - len(today_ai)
+        if slots_remaining <= 0:
+            return jsonify({"ok": True, "skipped": True,
+                            "reason": f"Already published {N_PER_DAY} entries for today."})
+
+        generated = []   # list of (entry_dict, ref_number)
         used_topics = set()
         ts_base = int(datetime.now(timezone.utc).timestamp())
 
-        for attempt in range(slots_remaining + 4):  # a few spare tries for duplicates
+        # A few spare tries: some topics won't have a findable real source,
+        # some will turn out duplicate — both just move to the next topic.
+        for attempt in range(slots_remaining + 6):
             if len(generated) >= slots_remaining:
                 break
 
-            all_entries = pending_entries + public_data.get("entries", [])
-            category, topic_label = pick_ai_scam_topic(today_str, pending_entries, skip_topics=used_topics)
+            category, topic_label = pick_ai_scam_topic(today_str, public_entries, skip_topics=used_topics)
             used_topics.add(topic_label)
 
-            # Duplicate prefilter
-            candidates = prefilter_duplicate_candidates(topic_label, category, all_entries)
+            # Duplicate prefilter against everything already published
+            candidates = prefilter_duplicate_candidates(topic_label, category, public_entries)
             if candidates:
                 candidate_titles = [e.get("title_en") or e.get("title", "") for e in candidates]
                 dup = check_duplicate_with_gemini(gemini_key, topic_label, candidate_titles)
                 if dup.get("is_duplicate"):
-                    continue  # skip, try next topic
+                    continue
 
-            # Generate
-            prompt = build_ai_scam_ed_prompt_v2(category, topic_label)
+            # Phase 1 — grounded search for a real, sourced case
+            search_prompt = build_grounded_search_prompt(category, topic_label)
             try:
-                parsed = call_gemini_structured(
-                    gemini_key, prompt, AI_DAILY_SCAM_ED_SCHEMA, max_tokens=4000
+                grounded_text, source_urls = call_gemini_grounded(gemini_key, search_prompt)
+            except Exception:
+                continue
+
+            if not grounded_text or "NO VERIFIABLE SOURCE FOUND" in grounded_text or not source_urls:
+                continue  # hard gate: no real source URL, no publish
+
+            best_source = source_urls[0]
+
+            # Phase 2 — structured trilingual extraction from the grounded text
+            try:
+                parsed = extract_scam_story_from_grounded_text(
+                    gemini_key, grounded_text, category, topic_label
                 )
             except urllib.error.HTTPError as he:
                 body = he.read().decode()
@@ -2594,44 +2694,34 @@ def daily_scam_ed():
                     "hi": parsed["remedies_hi"],
                 },
                 "source_note":      parsed.get("source_note", ""),
+                "source_url":       best_source["uri"],
+                "source_title":     best_source.get("title", ""),
                 "lang":             "en",
                 "submitted_at":     datetime.now(timezone.utc).isoformat(),
+                "approved_at":      datetime.now(timezone.utc).isoformat(),
                 "origin":           "ai_generated",
                 "origin_date":      today_str,
                 "reported_count":   1,
-                "status":           "pending",
+                "status":           "approved",
             }
-            pending_entries.append(entry)
-            generated.append((entry, parsed, topic_label, ref_number))
+            public_entries.append(entry)
+            generated.append((entry, ref_number))
 
         if not generated:
             return jsonify({"ok": True, "skipped": True,
-                            "reason": "All candidate topics were duplicates."})
+                            "reason": "No topic today had a verifiable real source."})
 
-        # Single write for all generated entries
-        pending["entries"] = pending_entries[-500:]
-        github_put(PENDING_FILE, site_token, pending, pending_sha,
-                   f"AI daily scam-ed {today_str} ({len(generated)} entries)", timeout=15)
+        public_data["entries"] = public_entries[-1000:]
+        github_put(PUBLIC_FILE, site_token, public_data, public_sha,
+                   f"AI daily scam stories {today_str} ({len(generated)} published, sourced)", timeout=20)
 
-        # Telegram notifications — one message per story
+        # Simple info ping — no approve/reject buttons, nothing to action
         if bot_token and chat_id:
-            for entry, parsed, topic_label, ref_number in generated:
+            titles = "\n".join(f"• {e['title_en']} ({e['source_url']})" for e, _ in generated)
+            msg = f"🛡️ <b>{len(generated)} AI scam stories published today</b>\n\n{titles}"
+            for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
                 try:
-                    before_steps = parsed.get("remedies_en", {}).get("before", [])
-                    alert_text = (
-                        f"🤖 <b>Daily AI Scam Bulletin</b> ({ref_number})\n"
-                        f"Topic: <i>{topic_label}</i> · {parsed['category']}\n\n"
-                        f"<b>{parsed['title_en']}</b>\n\n"
-                        f"{parsed['story_en'][:600]}\n\n"
-                        f"<b>Prevention:</b>\n"
-                        + "\n".join(f"• {s}" for s in before_steps[:3])
-                        + "\n\nTap below to approve or reject."
-                    )
-                    for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
-                        try:
-                            send_telegram_with_buttons(bot_token, cid, alert_text, entry["id"])
-                        except Exception:
-                            pass
+                    send_telegram(bot_token, cid, msg)
                 except Exception:
                     pass
 
@@ -2639,8 +2729,8 @@ def daily_scam_ed():
             "ok": True,
             "generated": len(generated),
             "entries": [
-                {"ref_number": ref_number, "category": parsed["category"], "title": parsed["title_en"]}
-                for _, parsed, _, ref_number in generated
+                {"ref_number": ref_number, "category": e["category"], "title": e["title_en"], "source_url": e["source_url"]}
+                for e, ref_number in generated
             ],
         })
 
