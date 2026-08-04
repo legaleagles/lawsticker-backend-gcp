@@ -2504,12 +2504,16 @@ MARKETING_TRICK_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "category":          {"type": "STRING"},
+        "where_it_happens":  {"type": "STRING"},
         "trick_title_en":    {"type": "STRING"},
         "trick_title_te":    {"type": "STRING"},
         "trick_title_hi":    {"type": "STRING"},
         "trick_explain_en":  {"type": "STRING"},
         "trick_explain_te":  {"type": "STRING"},
         "trick_explain_hi":  {"type": "STRING"},
+        "watch_for_en":      {"type": "ARRAY", "items": {"type": "STRING"}},
+        "watch_for_te":      {"type": "ARRAY", "items": {"type": "STRING"}},
+        "watch_for_hi":      {"type": "ARRAY", "items": {"type": "STRING"}},
         "smart_response_en": {"type": "STRING"},
         "smart_response_te": {"type": "STRING"},
         "smart_response_hi": {"type": "STRING"},
@@ -2517,9 +2521,10 @@ MARKETING_TRICK_SCHEMA = {
         "legal_note_en":     {"type": "STRING"},
     },
     "required": [
-        "category",
+        "category", "where_it_happens",
         "trick_title_en", "trick_title_te", "trick_title_hi",
         "trick_explain_en", "trick_explain_te", "trick_explain_hi",
+        "watch_for_en", "watch_for_te", "watch_for_hi",
         "smart_response_en", "smart_response_te", "smart_response_hi",
         "share_line_en", "legal_note_en",
     ],
@@ -2536,8 +2541,10 @@ This is NOT a scam or fraud story — it's a common, usually-legal-adjacent-but-
 Generate ALL fields in a single response:
 
 category — short label, e.g. "Overcharging", "Dark Pattern", "Hidden Fee", "Fake Urgency", "Bundling Trick"
+where_it_happens — short phrase, e.g. "Malls, cinemas & food courts" or "Online checkout pages" — where a shopper is most likely to run into this
 trick_title_en/te/hi — punchy, specific headline naming the trick (max 12 words) — should make someone stop scrolling
 trick_explain_en/te/hi — 2 short paragraphs: what the business does and why it works on people psychologically or practically. Plain language, no jargon.
+watch_for_en/te/hi — array of exactly 3 short (under 12 words each) concrete warning signs a shopper can spot in the moment, e.g. "Price is only visible after you've already committed to buying"
 smart_response_en/te/hi — a SHORT, confident, word-for-word script (1-3 sentences) the person can literally say or do in the moment to push back. Must be realistic and non-confrontational, something an ordinary person would actually say.
 share_line_en — ONE punchy sentence (under 20 words) written for a WhatsApp status or Instagram caption — should make people want to forward it. No hashtags.
 legal_note_en — ONE sentence citing the relevant Indian law/rule ONLY if one genuinely, specifically applies (e.g. Legal Metrology (Packaged Commodities) Rules 2011 for MRP, Consumer Protection Act 2019 for unfair trade practice, RBI guidelines for EMI/loan practices). If no specific law applies, say "This is a business practice, not necessarily illegal — but you can still push back."
@@ -2593,12 +2600,16 @@ def daily_marketing_trick():
             "id":            f"trick-{int(datetime.now(timezone.utc).timestamp())}",
             "topic_label":   topic_label,
             "category":      parsed["category"],
+            "where":         parsed.get("where_it_happens", ""),
             "title_en":      parsed["trick_title_en"],
             "title_te":      parsed["trick_title_te"],
             "title_hi":      parsed["trick_title_hi"],
             "explain_en":    parsed["trick_explain_en"],
             "explain_te":    parsed["trick_explain_te"],
             "explain_hi":    parsed["trick_explain_hi"],
+            "watch_for_en":  parsed.get("watch_for_en", []),
+            "watch_for_te":  parsed.get("watch_for_te", []),
+            "watch_for_hi":  parsed.get("watch_for_hi", []),
             "response_en":   parsed["smart_response_en"],
             "response_te":   parsed["smart_response_te"],
             "response_hi":   parsed["smart_response_hi"],
