@@ -1497,12 +1497,33 @@ def llb5_daily_lecture_all():
     else:
         subjects = list(LLB5_SUBJECTS.keys())
 
+    # Time-budgeted, not subject-count-limited: cron-job.org's own client
+    # gives up waiting well before a full batch of subjects can finish
+    # generating (each one is a real Gemini call, often 10-20+ seconds).
+    # Stop starting new subjects once the budget is used up and return
+    # immediately with whatever's done — anything left over is picked up
+    # automatically on the NEXT run of this same job, via the self-healing
+    # "oldest missing day" logic already in _llb5_generate_one_subject_lecture.
+    # Default budget is deliberately well under typical free-tier cron
+    # client timeouts (usually ~30s). Override with ?budget_seconds=N.
+    try:
+        budget_seconds = float(request.args.get("budget_seconds", 20))
+    except ValueError:
+        budget_seconds = 20
+
+    start_time = time.time()
     results = []
+    ran_out_of_time = False
     for subject in subjects:
+        if time.time() - start_time > budget_seconds:
+            ran_out_of_time = True
+            break
         try:
             results.append(_llb5_generate_one_subject_lecture(subject, site_token, gemini_key))
         except Exception as e:
             results.append({"ok": False, "subject": subject, "error": str(e)})
+
+    untouched = subjects[len(results):] if ran_out_of_time else []
 
     # Report the REAL outcome to Telegram regardless of whether cron-job.org
     # itself times out waiting for this response — that gives a false
@@ -1527,8 +1548,10 @@ def llb5_daily_lecture_all():
             lines.append(f"❌ FAILED ({len(failed)}):")
             for r in failed:
                 lines.append(f"  • {r['subject']}: {r.get('error','unknown error')[:400]}")
-        else:
-            lines.append("No failures.")
+        if untouched:
+            lines.append(f"⏳ Not reached this run, will auto-catch-up next time ({len(untouched)}): " + ", ".join(untouched))
+        if not failed and not untouched:
+            lines.append("All done, no issues.")
 
         msg = "\n".join(lines)
         try:
@@ -1540,6 +1563,8 @@ def llb5_daily_lecture_all():
         "ok": all(r.get("ok") for r in results),
         "semester": semester_param or "all",
         "results": results,
+        "ran_out_of_time": ran_out_of_time,
+        "not_reached_this_run": untouched,
     })
 
 
