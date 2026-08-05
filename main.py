@@ -829,6 +829,7 @@ LLB5_LECTURE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "lecture_title": {"type": "STRING"},
+        "memory_hook": {"type": "STRING"},
         "concept_explanation": {"type": "STRING"},
         "key_provisions": {"type": "ARRAY", "items": {"type": "STRING"}},
         "case_laws": {
@@ -838,20 +839,26 @@ LLB5_LECTURE_SCHEMA = {
                 "properties": {
                     "case_name": {"type": "STRING"},
                     "citation": {"type": "STRING"},
-                    "principle": {"type": "STRING"},
+                    "facts": {"type": "STRING"},
+                    "holding": {"type": "STRING"},
+                    "why_it_matters": {"type": "STRING"},
                 },
-                "required": ["case_name", "principle"]
+                "required": ["case_name", "facts", "holding", "why_it_matters"]
             }
         },
+        "real_world_example": {"type": "STRING"},
         "illustration": {"type": "STRING"},
+        "quick_answer": {"type": "STRING"},
+        "essay_answer": {"type": "STRING"},
         "exam_angle": {"type": "STRING"},
         "quick_recap": {"type": "ARRAY", "items": {"type": "STRING"}},
         "importance_stars": {"type": "INTEGER"},
         "importance_reason": {"type": "STRING"},
     },
     "required": [
-        "lecture_title", "concept_explanation", "key_provisions", "case_laws",
-        "illustration", "exam_angle", "quick_recap", "importance_stars", "importance_reason"
+        "lecture_title", "memory_hook", "concept_explanation", "key_provisions", "case_laws",
+        "real_world_example", "illustration", "quick_answer", "essay_answer", "exam_angle",
+        "quick_recap", "importance_stars", "importance_reason"
     ],
 }
 
@@ -882,23 +889,29 @@ topic — short topic title (under 12 words), specific enough that a student kno
 
 
 def build_llb5_lecture_prompt(subject_name, unit, topic):
-    return f"""You are an experienced Indian law faculty member writing today's self-study lecture for an LL.B. student following the Osmania University syllabus, for the paper "{subject_name}".
+    return f"""You are an outstanding, memorable Indian law faculty member writing today's self-study lecture for an LL.B. student following the Osmania University syllabus, for the paper "{subject_name}".
 
 TODAY'S TOPIC: "{topic}" (from {unit})
 
-Write a complete, exam-ready lecture covering everything a good professor would want a student to know about this specific topic:
+This student may never attend a physical class for this topic — this lecture is their ONLY exposure to it. Write something that actually teaches AND sticks in memory, not a dry summary. Cover it at every level a student might need: quick revision, short-answer exam response, and full essay-length answer.
 
-lecture_title — clear title for today's lecture
+Generate ALL fields in a single response:
+
+lecture_title — clear, specific title for today's lecture
+memory_hook — ONE vivid sentence, analogy, or mnemonic that makes this topic memorable and impossible to confuse with a similar concept — this is the single thing the student should still remember a month from now
 concept_explanation — 3-5 paragraphs, plain but precise legal language, building the concept from first principles through to its practical application. Assume no prior knowledge of today's specific topic, but assume general first-year law familiarity.
 key_provisions — array of the specific Sections/Articles/provisions relevant to this topic, each as "Section X — one-line description of what it says"
-case_laws — array of 2-5 landmark or illustrative cases genuinely relevant to this exact topic, each with case_name, citation (if you're confident of it, else leave empty string — never invent a citation), and principle (what the case established, in one sentence)
-illustration — one concrete worked example or hypothetical fact pattern showing the concept applied, written the way a professor would explain it with a real scenario
-exam_angle — 2-3 sentences on how this topic is typically tested (short answer vs long answer, common angles examiners take, what distinguishes a good answer from an average one)
-quick_recap — array of 4-6 short bullet points a student can review the night before the exam
+case_laws — array of 2-5 landmark or illustrative cases genuinely relevant to this exact topic. For EACH case give: case_name, citation (only if you're genuinely confident of it, else empty string — never invent a citation), facts (2-3 sentences on what actually happened between the parties), holding (what the court actually decided, precisely), why_it_matters (1-2 sentences on why this case is significant for this topic specifically, e.g. what test/principle it established that's still applied today)
+real_world_example — a genuine real-world/contemporary scenario (news-style, not a textbook hypothetical) showing why this topic matters outside an exam hall — something that makes the student go "oh, that's what this is actually for"
+illustration — ONE concrete worked hypothetical fact pattern (the kind a professor poses in class) applying the concept step by step, distinct from the real-world example above
+quick_answer — a tight, exam-ready SHORT ANSWER version (120-180 words) — what a student should write for a 5-mark short-answer question, hitting only the essential points
+essay_answer — a FULL long-form ESSAY ANSWER (500-700 words) structured with a clear introduction, developed body covering all sub-issues with supporting case law woven in, and a conclusion — the depth expected for a 10-15 mark long-answer question. Write it the way a topper's answer sheet would read.
+exam_angle — 2-3 sentences on how this topic is typically tested (which question type it favours, common angles examiners take, what distinguishes a good answer from an average one)
+quick_recap — array of 4-6 short bullet points for the night before the exam
 importance_stars — your own honest rating 1-5 of how likely and how heavily this specific topic is tested relative to the rest of the syllabus (5 = near-certain to appear and central to the paper, 1 = rarely tested standalone)
-importance_reason — ONE sentence explaining your star rating (e.g. "This is a frequently asked long-answer question and forms the doctrinal core of the unit" or "Usually only tested as part of a broader question, rarely asked standalone")
+importance_reason — ONE sentence explaining your star rating
 
-Be thorough — this is the student's only preparation for this topic, so don't hold back on depth. Write in clear English."""
+Be thorough and genuinely engaging — vary sentence rhythm, use concrete detail, don't pad with filler. This is the student's only preparation for this topic. Write in clear English."""
 
 
 @app.route('/api/llb5-build-topics', methods=['GET'])
@@ -995,7 +1008,7 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
 
     prompt = build_llb5_lecture_prompt(LLB5_SUBJECTS[subject]["name"], entry_meta["unit"], entry_meta["topic"])
     try:
-        parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=6000)
+        parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=12000)
     except Exception as ge:
         return {"ok": False, "subject": subject, "error": f"Generation error: {str(ge)[:300]}"}
 
@@ -1008,10 +1021,14 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
         "unit": entry_meta["unit"],
         "topic": entry_meta["topic"],
         "lecture_title": parsed["lecture_title"],
+        "memory_hook": parsed.get("memory_hook", ""),
         "concept_explanation": parsed["concept_explanation"],
         "key_provisions": parsed.get("key_provisions", []),
         "case_laws": parsed.get("case_laws", []),
+        "real_world_example": parsed.get("real_world_example", ""),
         "illustration": parsed.get("illustration", ""),
+        "quick_answer": parsed.get("quick_answer", ""),
+        "essay_answer": parsed.get("essay_answer", ""),
         "exam_angle": parsed.get("exam_angle", ""),
         "quick_recap": parsed.get("quick_recap", []),
         "importance_stars": parsed.get("importance_stars", 3),
