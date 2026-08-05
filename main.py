@@ -1469,7 +1469,13 @@ def llb5_daily_lecture():
 
 @app.route('/api/llb5-daily-lecture-all', methods=['GET'])
 def llb5_daily_lecture_all():
-    # THE cron target — one job, once a day, refreshes all 5 subjects.
+    # Cron target. Pass ?semester=N (1-6) to only refresh that semester's
+    # subjects — recommended: 6 separate cron jobs, one per semester,
+    # staggered ~15 min apart, instead of one job doing all 31 subjects
+    # in a single burst. Smaller blast radius if one run has trouble, and
+    # far less likely to trip Gemini's rate/demand limits than 31 calls
+    # back to back. Omit ?semester to run everything in one call (fine
+    # for manual testing, not recommended as the daily cron target).
     # Each subject is independent: a failure or skip on one never blocks
     # the others, and a day that's already generated is never touched
     # again (so nothing gets "washed out" — today's content, once
@@ -1479,8 +1485,20 @@ def llb5_daily_lecture_all():
     if not site_token or not gemini_key:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
+    semester_param = request.args.get("semester")
+    if semester_param:
+        try:
+            semester = int(semester_param)
+        except ValueError:
+            return jsonify({"ok": False, "error": "semester must be an integer 1-6."}), 400
+        subjects = [s for s, info in LLB5_SUBJECTS.items() if info.get("semester") == semester]
+        if not subjects:
+            return jsonify({"ok": False, "error": f"No subjects found for semester {semester}."}), 400
+    else:
+        subjects = list(LLB5_SUBJECTS.keys())
+
     results = []
-    for subject in LLB5_SUBJECTS.keys():
+    for subject in subjects:
         try:
             results.append(_llb5_generate_one_subject_lecture(subject, site_token, gemini_key))
         except Exception as e:
@@ -1488,6 +1506,7 @@ def llb5_daily_lecture_all():
 
     return jsonify({
         "ok": all(r.get("ok") for r in results),
+        "semester": semester_param or "all",
         "results": results,
     })
 
