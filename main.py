@@ -638,7 +638,7 @@ Analyze thoroughly and produce, in {lang_names.get(lang, "English")}:
 Be honest and calibrated — false alarms erode trust just as much as missed warnings. If this looks like a completely normal, legitimate interaction, say so plainly rather than manufacturing concern. Give this a real, thoughtful analysis — you have room to be genuinely thorough here, not just a one-line reaction."""
 
 
-def call_gemini_structured(api_key, prompt, schema, max_tokens=600):
+def call_gemini_structured(api_key, prompt, schema, max_tokens=600, timeout=15):
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -653,7 +653,7 @@ def call_gemini_structured(api_key, prompt, schema, max_tokens=600):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = json.loads(resp.read().decode())
     raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw_text)
@@ -1230,7 +1230,7 @@ def _llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False)
                 # 45 structured objects in one response needs real headroom —
                 # too low a limit here truncates the JSON mid-array and the
                 # whole call fails, which is why nothing was showing up.
-                parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=8000)
+                parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=8000, timeout=45)
                 last_error = None
                 break
             except urllib.error.HTTPError as he:
@@ -1391,7 +1391,7 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
     last_error = None
     for attempt in range(3):
         try:
-            parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=12000)
+            parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=12000, timeout=45)
             last_error = None
             break
         except Exception as ge:
@@ -1503,6 +1503,38 @@ def llb5_daily_lecture_all():
             results.append(_llb5_generate_one_subject_lecture(subject, site_token, gemini_key))
         except Exception as e:
             results.append({"ok": False, "subject": subject, "error": str(e)})
+
+    # Report the REAL outcome to Telegram regardless of whether cron-job.org
+    # itself times out waiting for this response — that gives a false
+    # "failed" signal even when generation succeeds server-side, since the
+    # cron caller's own client timeout is often shorter than a full batch
+    # takes. This notification is the source of truth, not the cron
+    # dashboard's pass/fail marker.
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
+    if bot_token and chat_id_config:
+        sem_label = f"Semester {semester_param}" if semester_param else "All semesters"
+        generated = [r for r in results if r.get("ok") and not r.get("skipped")]
+        skipped = [r for r in results if r.get("ok") and r.get("skipped")]
+        failed = [r for r in results if not r.get("ok")]
+
+        lines = [f"🏹 <b>Eklavya daily refresh — {sem_label}</b>"]
+        if generated:
+            lines.append(f"✅ Generated ({len(generated)}): " + ", ".join(f"{r['subject']} (day {r.get('day','?')})" for r in generated))
+        if skipped:
+            lines.append(f"⏭️ Skipped ({len(skipped)}): " + ", ".join(r["subject"] for r in skipped))
+        if failed:
+            lines.append(f"❌ FAILED ({len(failed)}):")
+            for r in failed:
+                lines.append(f"  • {r['subject']}: {r.get('error','unknown error')[:400]}")
+        else:
+            lines.append("No failures.")
+
+        msg = "\n".join(lines)
+        try:
+            send_telegram_to_all(bot_token, chat_id_config, msg[:4000])  # Telegram message cap
+        except Exception:
+            pass  # notification failing must never break the actual response
 
     return jsonify({
         "ok": all(r.get("ok") for r in results),
