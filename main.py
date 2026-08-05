@@ -1263,7 +1263,23 @@ def _llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False)
             "topics": topics,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
-        github_put(fname, site_token, data, sha, f"Build LLB5 topic index: {subject}", timeout=20)
+        # The GitHub write can also fail transiently (rapid consecutive
+        # commits, brief API hiccup) — retry a couple times before giving
+        # up, so a subject that generated fine doesn't get lost at the
+        # last step.
+        write_error = None
+        for attempt in range(3):
+            try:
+                github_put(fname, site_token, data, sha, f"Build LLB5 topic index: {subject}", timeout=20)
+                write_error = None
+                break
+            except Exception as we:
+                write_error = f"GitHub write error: {str(we)[:300]}"
+                if attempt < 2:
+                    time.sleep(3 * (attempt + 1))
+                    continue
+        if write_error:
+            return {"ok": False, "subject": subject, "error": write_error}
         return {"ok": True, "subject": subject, "topic_count": len(topics)}
     except Exception as e:
         return {"ok": False, "subject": subject, "error": str(e)}
