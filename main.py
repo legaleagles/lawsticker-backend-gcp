@@ -1927,7 +1927,7 @@ def render_emoji_layer(font_dir, icon, target_size, opacity=1.0):
     return big
 
 
-def render_social_card(hook, subtext, label, icon="\U0001F4A1", ai_background_bytes=None):
+def render_social_card(hook, subtext, label, icon="\U0001F4A1", ai_background_bytes=None, badge_text="DID YOU KNOW?"):
     # Matches rights-shorts.html's actual design system precisely (same
     # badge, watermark, footer band) — the background is now either real
     # Gemini-generated art (hybrid approach) or the original flat gradient
@@ -2001,7 +2001,7 @@ def render_social_card(hook, subtext, label, icon="\U0001F4A1", ai_background_by
     img.alpha_composite(wm, (int(W / 2 - 350), 1150))
     draw = ImageDraw.Draw(img)
 
-    badge_text = "DID YOU KNOW?"
+    badge_text = badge_text
     bw = draw.textlength(badge_text, font=bold_36) + 76
     draw.rounded_rectangle([(W / 2 - bw / 2, 300), (W / 2 + bw / 2, 378)], radius=39, fill=ACCENT)
     draw_centered(draw, badge_text, bold_36, W / 2, 320, (13, 17, 23))
@@ -2626,6 +2626,41 @@ def daily_marketing_trick():
 
         return jsonify({"ok": True, "entry": {"title": entry["title_en"], "category": entry["category"]}})
 
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/api/trick-card-image', methods=['GET'])
+def trick_card_image():
+    # Deterministic PIL render, no AI image generation — reuses the exact
+    # same non-AI branded template as the daily social card's fallback path.
+    # Optional ?id=trick-xxxx to render an older entry; defaults to latest.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    try:
+        data, _ = github_get(TRICKS_FILE, site_token, timeout=8)
+        entries = (data or {}).get("entries", [])
+        if not entries:
+            return jsonify({"ok": False, "error": "No tricks published yet."}), 404
+
+        wanted_id = request.args.get("id")
+        entry = None
+        if wanted_id:
+            entry = next((e for e in entries if e.get("id") == wanted_id), None)
+        if not entry:
+            entry = entries[-1]
+
+        img_bytes = render_social_card(
+            hook=entry.get("title_en", ""),
+            subtext=entry.get("response_en", ""),
+            label=entry.get("category", "Smart Shopper"),
+            icon="\U0001F6CD\uFE0F",  # shopping bags
+            badge_text="SMART SHOPPER",
+        )
+        resp = app.response_class(img_bytes, mimetype="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
