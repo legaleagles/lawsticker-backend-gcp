@@ -22,7 +22,7 @@ import time
 import urllib.request
 import urllib.error
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
@@ -1338,9 +1338,9 @@ def llb5_build_all_topics():
 
 
 def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
-    # Shared logic for a single subject's "today" lecture — used by both
+    # Shared logic for a single subject's next-due lecture — used by both
     # the per-subject endpoint (handy for manual testing/backfill) and the
-    # single combined endpoint that refreshes all 5 subjects in one call.
+    # single combined endpoint that refreshes all subjects in one call.
     # Never overwrites an existing day's lecture — each day's content is
     # permanent once generated; only a day that hasn't been written yet
     # gets filled in.
@@ -1350,16 +1350,10 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
 
     start = datetime.fromisoformat(topics_data.get("start_date", LLB5_START_DATE)).date()
     today = datetime.now(timezone.utc).date()
-    day_num = (today - start).days + 1
+    today_day_num = (today - start).days + 1
 
-    if day_num < 1:
+    if today_day_num < 1:
         return {"ok": True, "subject": subject, "skipped": True, "reason": f"Plan hasn't started yet (starts {start})."}
-    if day_num > len(topics_data["topics"]):
-        return {"ok": True, "subject": subject, "skipped": True, "reason": "Plan already completed."}
-
-    entry_meta = next((t for t in topics_data["topics"] if t.get("day") == day_num), None)
-    if not entry_meta:
-        return {"ok": False, "subject": subject, "error": f"No topic defined for day {day_num}."}
 
     lfname = llb5_lectures_file(subject)
     try:
@@ -1369,21 +1363,52 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
     except Exception:
         lectures, lsha = {"lectures": {}}, None
 
-    if str(day_num) in lectures.get("lectures", {}):
-        return {"ok": True, "subject": subject, "skipped": True, "reason": f"Day {day_num} already generated."}
+    # Self-healing catch-up: don't just target "today's" day — find the
+    # OLDEST day up to today that's still missing. If a run ever fails
+    # (API hiccup, transient error), the very next run automatically
+    # fills in what was skipped instead of permanently losing that day.
+    existing_days = lectures.get("lectures", {})
+    total_days = len(topics_data["topics"])
+    day_num = None
+    for candidate in range(1, min(today_day_num, total_days) + 1):
+        if str(candidate) not in existing_days:
+            day_num = candidate
+            break
+
+    if day_num is None:
+        if today_day_num > total_days:
+            return {"ok": True, "subject": subject, "skipped": True, "reason": "Plan already completed."}
+        return {"ok": True, "subject": subject, "skipped": True, "reason": f"Day {today_day_num} already generated."}
+
+    entry_meta = next((t for t in topics_data["topics"] if t.get("day") == day_num), None)
+    if not entry_meta:
+        return {"ok": False, "subject": subject, "error": f"No topic defined for day {day_num}."}
 
     prompt = build_llb5_lecture_prompt(LLB5_SUBJECTS[subject]["name"], entry_meta["unit"], entry_meta["topic"])
-    try:
-        parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=12000)
-    except Exception as ge:
-        return {"ok": False, "subject": subject, "error": f"Generation error: {str(ge)[:300]}"}
+
+    # Retry transient Gemini errors (503 high-demand etc.) before giving up.
+    parsed = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=12000)
+            last_error = None
+            break
+        except Exception as ge:
+            last_error = f"Generation error: {str(ge)[:300]}"
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+                continue
+            break
+    if last_error:
+        return {"ok": False, "subject": subject, "error": last_error}
 
     if not parsed or not parsed.get("concept_explanation"):
         return {"ok": False, "subject": subject, "error": "Generation returned no content."}
 
     lecture_entry = {
         "day": day_num,
-        "date": today.isoformat(),
+        "date": (start + timedelta(days=day_num - 1)).isoformat(),
         "unit": entry_meta["unit"],
         "topic": entry_meta["topic"],
         "lecture_title": parsed["lecture_title"],
@@ -1402,10 +1427,21 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     lectures.setdefault("lectures", {})[str(day_num)] = lecture_entry
-    try:
-        github_put(lfname, site_token, lectures, lsha, f"LLB5 {subject} day {day_num}: {entry_meta['topic'][:50]}", timeout=20)
-    except Exception as we:
-        return {"ok": False, "subject": subject, "error": f"Save error: {str(we)[:300]}"}
+
+    write_error = None
+    for attempt in range(3):
+        try:
+            github_put(lfname, site_token, lectures, lsha, f"LLB5 {subject} day {day_num}: {entry_meta['topic'][:50]}", timeout=20)
+            write_error = None
+            break
+        except Exception as we:
+            write_error = f"Save error: {str(we)[:300]}"
+            if attempt < 2:
+                time.sleep(3 * (attempt + 1))
+                continue
+            break
+    if write_error:
+        return {"ok": False, "subject": subject, "error": write_error}
 
     return {"ok": True, "subject": subject, "day": day_num, "topic": entry_meta["topic"]}
 
