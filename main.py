@@ -739,6 +739,287 @@ Write Telugu and Hindi as genuine translations — proper sentences in the corre
 
 
 GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+
+# ============================================================
+# LLB 5TH SEMESTER STUDY PLAN — "Eklavya"
+# One-time topic-index generation per subject (45 sequential days,
+# derived from the actual Osmania University syllabus units below),
+# then a daily cron that generates ONLY that day's full lecture —
+# never pre-generated in bulk, so nothing leaks ahead of schedule.
+# ============================================================
+
+LLB5_START_DATE = "2026-08-06"  # day 1 of the 45-day plan, IST calendar dates
+LLB5_DAYS = 45
+
+LLB5_SUBJECTS = {
+    "cpc": {
+        "name": "Civil Procedure Code & Law of Limitation",
+        "short": "CPC & Limitation",
+        "units": {
+            "Unit I": "Codification of Civil Procedure and Introduction to CPC — Principal features of the Civil Procedure Code — Suits — Parties to Suit — Framing of Suit — Institution of Suits — Bars of Suit — Doctrines of Sub Judice and Res Judicata — Place of Suing — Transfer of suits — Territorial Jurisdiction — 'Cause of Action' and Jurisdictional Bars — Summons — Service of Foreign summons.",
+            "Unit II": "Pleadings — Contents of pleadings — Forms of Pleading — Striking out/Amendment of Pleadings — Plaint — Essentials of Plaint — Return of Plaint — Rejection of Plaint — Production and marking of Documents — Written Statement — Counterclaim — Set off — Application of Sec.89 — Framing of issues.",
+            "Unit III": "Appearance and Examination of parties & Adjournments — Ex-parte Procedure — Summoning and Attendance of Witnesses — Examination — Admissions — Production, Impounding, Return of Documents — Hearing — Affidavit — Judgment and Decree — Concepts of Judgment, Decree, and Interim Orders and Stay — Injunctions — Appointment of Receivers and Commissions — Costs — Execution — Concept of Execution — General Principles of Execution — Power of Executing Courts — Procedure for Execution — Modes of Execution — Arrest and detention — Attachment and Sale.",
+            "Unit IV": "Suits in Particular Cases — Suits by or against Government — Suits relating to public matters — Suits by or against minors, persons with unsound mind — Suits by indigent persons — Interpleader suits — Incidental and supplementary proceedings — Appeals, Reference, Review and Revision — Appeals from Original Decrees — Appeals from Appellate Decrees — Appeals from Orders — General Provisions Relating to Appeals.",
+            "Unit V": "Law of Limitation — Concept of Limitation — Object of limitation — General Principles of Limitation — Extension — Condonation of delay — Sufficient Cause — Computation of limitation — Acknowledgment and Part-payment — Legal Disability — Provisions of the Limitation Act, 1963 (Excluding Schedule)."
+        }
+    },
+    "bnss": {
+        "name": "Bharatiya Nagarik Suraksha Sanhita, Juvenile Justice & Probation of Offenders",
+        "short": "BNSS & Juvenile Justice",
+        "units": {
+            "Unit I": "BNSS — Object and Importance — Comparison with Cr.P.C, 1973 — Definitions — Difference between Cognizable and Non-Cognizable Offences — Bailable and Non-Bailable Offences — Investigation, Inquiry and Trial — Classification of Criminal Courts, Jurisdiction and Powers — Directorate of Prosecution — role of Prosecutors under BNSS — Role of Defence Lawyer — Role of Prisons and Correctional Methods — Indian Constitution and BNSS.",
+            "Unit II": "Maintenance of Wife, Children and Parents (Sec.144-147) — Security for Keeping Peace and Good Behaviour (Sec.125-143) — Cognizance by police — Role of Police under BNSS — Preventive Action of Police — Unlawful Assembly — Public Nuisance — Urgent Cases of Nuisance (Sec.148-172) — Information to Police — FIR (Sec.173-196) — Arrest of Persons (Sec.35-62) — Arrest with/without Warrant — Rights of Arrested Person — Proclamation and Attachment of Property (Sec.63-93) — Process to Compel Production of Things (Sec.94-110).",
+            "Unit III": "Trial, Charge, Inquiries and Bail — Complaints to Magistrates — Process to Compel Appearance — Cognizance of Offences by Magistrate — General Principles of Fair Trial (Sec.197-222) — Trial (Sec.223-233) — Charge, Joinder of Charges (Sec.234-247) — Trial Before Court of Session (Sec.248-260) — Trial of Warrant Case by Magistrate (Sec.261-273) — Trial of Summons Cases (Sec.274-282) — Summary Trials (Sec.283-288) — Plea Bargaining (Sec.289-300) — Provisions as to Bails and Bonds (Sec.478-496) — General Provisions as to Inquiries & Trial (Sec.337-378).",
+            "Unit IV": "Administration of Criminal Justice — Offences affecting Administration of Justice (Sec.379-391) — The Judgement (Sec.392-406) — Submission of Death Sentence for Confirmation (Sec.407-412) — Appeal, Revision, Reference (Sec.413-435) — Execution, Suspension, Remission and Commutation of Sentence (Sec.453-477) — Inherent Powers of the Court — Transfer of Criminal Cases.",
+            "Unit V": "The Juvenile Justice (Care and Protection of Children) Act, 2015 — Preliminary and General Provisions — Salient Features — Procedure — Treatment and Rehabilitation of Juveniles — Protection of Juvenile offenders — Legislative and Judicial Role — Probation of Offenders Act — Probation and Parole — Authority Granting Parole — Supervision — Conditional Release — Suspension of Sentence — Salient Features of the Act."
+        }
+    },
+    "banking": {
+        "name": "Law of Banking and Negotiable Instruments",
+        "short": "Banking & NI Act",
+        "units": {
+            "Unit I": "History of the Banking Regulation Act — Salient features — Banking Business and its importance in modern times — Different kinds of Banking — impact of Information Technology on Banking.",
+            "Unit II": "Relationship between Banker and Customer — Debtor and Creditor Relationship — Fiduciary Relationship — Trustee and Beneficiary — Principal and Agent — Bailor and Bailee — Guarantor.",
+            "Unit III": "Cheques — Crossed Cheques — Account Payee — Banker's Drafts — Dividend Warrants — Negotiable instruments and deemed negotiable instruments — Salient features of The Negotiable Instruments Act — The Negotiable Instruments (Amendment) Act 2018.",
+            "Unit IV": "The Paying Banker — Statutory protection to Bankers — Collecting Banker — Statutory protection — Rights and obligations of paying and collecting bankers.",
+            "Unit V": "Banker's lien and set off — Advances — Pledge — Land — Stocks — Shares — Life Policies — Document of title to Goods — Bank Guarantees — Letters of Credit — Recovery of Bank loans and position under the SARFAESI Act, 2002 — Jurisdiction and powers of Debt Recovery Tribunal."
+        }
+    },
+    "adr": {
+        "name": "Alternate Dispute Resolution",
+        "short": "ADR",
+        "units": {
+            "Unit I": "Alternate Dispute Resolution — Characteristics — Advantages and Disadvantages — Unilateral, Bilateral, Triadic (Third Party) Intervention — Techniques and processes — Negotiation, Conciliation, Mediation, Arbitration — Distinction between Arbitration, Conciliation and Negotiation — ADR under different laws in India.",
+            "Unit II": "The Arbitration and Conciliation Act, 1996 — Historical Background and Objectives — Amendment Acts 2015 & 2019 — Definitions of Arbitration, Arbitrator, Arbitration Agreement — Appointment/Termination of Arbitrator — Proceedings in Arbitral Tribunal — Arbitral Award — Setting aside of Award — Finality and Enforcement — Conciliation — Appointment/Powers of Conciliators — Arbitration Council of India (ACI) — International Commercial Arbitration — UNCITRAL Model Law 1985 — Geneva Convention 1927 — New York Convention 1958 — Recognition and Enforcement of Foreign Award — Singapore Convention on Mediation 2019 — Online Dispute Resolution.",
+            "Unit III": "Other Alternative Dispute Resolution Systems — Tribunals — Lokpal and Lokayukta — Lok Adalats — Family Courts — Commercial Courts — Section 89 and Order X, Rules 1A, 1B, 1C of CPC — ADR and Mediation Rules — Pre-litigation Mediation in India."
+        }
+    },
+    "ethics": {
+        "name": "Professional Ethics and Professional Accounting System",
+        "short": "Professional Ethics",
+        "units": {
+            "Unit I": "Development of Legal Profession in India — The Advocates Act, 1961 — Right to Practice — Constitutional guarantee under Article 19(1)(g) — Enrolment and Practice — Latest BCI Rules — All India Bar Examination (AIBE) — Advocates and Solicitors' firm — Elements of Advocacy.",
+            "Unit II": "Seven lamps of advocacy — Advocate's duties towards public, clients, court, and other advocates and legal aid — Bar Council of India's Code of Ethics.",
+            "Unit III": "Disciplinary proceedings — Professional misconduct — Disqualifications — Functions of Bar Council of India/State Bar Councils — Disciplinary Committees — Powers and functions — Disqualification and removal from rolls.",
+            "Unit IV": "Professional Accounting — Accountancy for Lawyers — Nature and functions of accounting — Important branches of accounting — Accounting and Law — Bar Bench Relations."
+        }
+    }
+}
+
+LLB5_TOPIC_INDEX_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "topics": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "day": {"type": "INTEGER"},
+                    "unit": {"type": "STRING"},
+                    "topic": {"type": "STRING"},
+                },
+                "required": ["day", "unit", "topic"]
+            }
+        }
+    },
+    "required": ["topics"]
+}
+
+LLB5_LECTURE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "lecture_title": {"type": "STRING"},
+        "concept_explanation": {"type": "STRING"},
+        "key_provisions": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "case_laws": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "case_name": {"type": "STRING"},
+                    "citation": {"type": "STRING"},
+                    "principle": {"type": "STRING"},
+                },
+                "required": ["case_name", "principle"]
+            }
+        },
+        "illustration": {"type": "STRING"},
+        "exam_angle": {"type": "STRING"},
+        "quick_recap": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "importance_stars": {"type": "INTEGER"},
+        "importance_reason": {"type": "STRING"},
+    },
+    "required": [
+        "lecture_title", "concept_explanation", "key_provisions", "case_laws",
+        "illustration", "exam_angle", "quick_recap", "importance_stars", "importance_reason"
+    ],
+}
+
+
+def llb5_topics_file(subject):
+    return f"llb5-{subject}-topics.json"
+
+
+def llb5_lectures_file(subject):
+    return f"llb5-{subject}-lectures.json"
+
+
+def build_llb5_topic_index_prompt(subject_name, units):
+    units_text = "\n\n".join(f"{u}:\n{content}" for u, content in units.items())
+    return f"""You are structuring the official Osmania University LL.B. syllabus for the paper "{subject_name}" into a {LLB5_DAYS}-day daily study plan.
+
+SYLLABUS (exact official units — do not add topics not implied by this text):
+{units_text}
+
+Break this syllabus into EXACTLY {LLB5_DAYS} sequential daily topics, in teaching order (Unit I concepts first, through to the final unit). Weight days per unit roughly by how much content that unit actually contains — dense units get more days, short units get fewer — but use all {LLB5_DAYS} days across all units combined.
+
+Each day should be one coherent, teachable topic (not a whole unit, not a single case name) — the size a good lecture covers in one sitting. Cover the syllabus faithfully and completely; do not invent sub-topics the syllabus doesn't contain.
+
+Return a "topics" array of exactly {LLB5_DAYS} objects, each with:
+day — integer 1 to {LLB5_DAYS}
+unit — which unit this belongs to (e.g. "Unit I")
+topic — short topic title (under 12 words), specific enough that a student knows exactly what will be taught that day"""
+
+
+def build_llb5_lecture_prompt(subject_name, unit, topic):
+    return f"""You are an experienced Indian law faculty member writing today's self-study lecture for an LL.B. student following the Osmania University syllabus, for the paper "{subject_name}".
+
+TODAY'S TOPIC: "{topic}" (from {unit})
+
+Write a complete, exam-ready lecture covering everything a good professor would want a student to know about this specific topic:
+
+lecture_title — clear title for today's lecture
+concept_explanation — 3-5 paragraphs, plain but precise legal language, building the concept from first principles through to its practical application. Assume no prior knowledge of today's specific topic, but assume general first-year law familiarity.
+key_provisions — array of the specific Sections/Articles/provisions relevant to this topic, each as "Section X — one-line description of what it says"
+case_laws — array of 2-5 landmark or illustrative cases genuinely relevant to this exact topic, each with case_name, citation (if you're confident of it, else leave empty string — never invent a citation), and principle (what the case established, in one sentence)
+illustration — one concrete worked example or hypothetical fact pattern showing the concept applied, written the way a professor would explain it with a real scenario
+exam_angle — 2-3 sentences on how this topic is typically tested (short answer vs long answer, common angles examiners take, what distinguishes a good answer from an average one)
+quick_recap — array of 4-6 short bullet points a student can review the night before the exam
+importance_stars — your own honest rating 1-5 of how likely and how heavily this specific topic is tested relative to the rest of the syllabus (5 = near-certain to appear and central to the paper, 1 = rarely tested standalone)
+importance_reason — ONE sentence explaining your star rating (e.g. "This is a frequently asked long-answer question and forms the doctrinal core of the unit" or "Usually only tested as part of a broader question, rarely asked standalone")
+
+Be thorough — this is the student's only preparation for this topic, so don't hold back on depth. Write in clear English."""
+
+
+@app.route('/api/llb5-build-topics', methods=['GET'])
+def llb5_build_topics():
+    # One-time (per subject) structuring of the syllabus into a 45-day
+    # sequence. Re-running for a subject that already has an index is a
+    # no-op unless ?force=1 is passed.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    subject = request.args.get("subject")
+    force = request.args.get("force") == "1"
+    if subject not in LLB5_SUBJECTS:
+        return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
+
+    try:
+        fname = llb5_topics_file(subject)
+        try:
+            existing, sha = github_get(fname, site_token, timeout=8)
+        except Exception:
+            existing, sha = None, None
+
+        if existing and existing.get("topics") and not force:
+            return jsonify({"ok": True, "skipped": True, "reason": "Topic index already exists. Use ?force=1 to regenerate."})
+
+        info = LLB5_SUBJECTS[subject]
+        prompt = build_llb5_topic_index_prompt(info["name"], info["units"])
+        parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=4000)
+        topics = parsed.get("topics", [])
+        if len(topics) < 10:
+            return jsonify({"ok": False, "error": "Generation produced too few topics, not saving."}), 502
+
+        topics.sort(key=lambda t: t.get("day", 0))
+        data = {
+            "subject": subject,
+            "subject_name": info["name"],
+            "start_date": LLB5_START_DATE,
+            "total_days": len(topics),
+            "topics": topics,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        github_put(fname, site_token, data, sha, f"Build LLB5 topic index: {subject}", timeout=20)
+        return jsonify({"ok": True, "subject": subject, "topic_count": len(topics)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/api/llb5-daily-lecture', methods=['GET'])
+def llb5_daily_lecture():
+    # Cron target — one call per subject per day. Generates ONLY the
+    # lecture for today's position in that subject's 45-day plan, and
+    # only once (checked against the cache before generating).
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    subject = request.args.get("subject")
+    if subject not in LLB5_SUBJECTS:
+        return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
+
+    try:
+        topics_data, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
+        if not topics_data or not topics_data.get("topics"):
+            return jsonify({"ok": False, "error": "No topic index yet — call /api/llb5-build-topics first."}), 404
+
+        start = datetime.fromisoformat(topics_data.get("start_date", LLB5_START_DATE)).date()
+        today = datetime.now(timezone.utc).date()
+        day_num = (today - start).days + 1
+
+        if day_num < 1:
+            return jsonify({"ok": True, "skipped": True, "reason": f"Plan hasn't started yet (starts {start})."})
+        if day_num > len(topics_data["topics"]):
+            return jsonify({"ok": True, "skipped": True, "reason": "Plan already completed for this subject."})
+
+        entry_meta = next((t for t in topics_data["topics"] if t.get("day") == day_num), None)
+        if not entry_meta:
+            return jsonify({"ok": False, "error": f"No topic defined for day {day_num}."}), 404
+
+        lfname = llb5_lectures_file(subject)
+        try:
+            lectures, lsha = github_get(lfname, site_token, timeout=8)
+            if lectures is None:
+                lectures = {"lectures": {}}
+        except Exception:
+            lectures, lsha = {"lectures": {}}, None
+
+        if str(day_num) in lectures.get("lectures", {}):
+            return jsonify({"ok": True, "skipped": True, "reason": f"Day {day_num} already generated."})
+
+        prompt = build_llb5_lecture_prompt(
+            LLB5_SUBJECTS[subject]["name"], entry_meta["unit"], entry_meta["topic"]
+        )
+        parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=4000)
+        if not parsed or not parsed.get("concept_explanation"):
+            return jsonify({"ok": False, "error": "Generation failed."}), 502
+
+        lecture_entry = {
+            "day": day_num,
+            "date": today.isoformat(),
+            "unit": entry_meta["unit"],
+            "topic": entry_meta["topic"],
+            "lecture_title": parsed["lecture_title"],
+            "concept_explanation": parsed["concept_explanation"],
+            "key_provisions": parsed.get("key_provisions", []),
+            "case_laws": parsed.get("case_laws", []),
+            "illustration": parsed.get("illustration", ""),
+            "exam_angle": parsed.get("exam_angle", ""),
+            "quick_recap": parsed.get("quick_recap", []),
+            "importance_stars": parsed.get("importance_stars", 3),
+            "importance_reason": parsed.get("importance_reason", ""),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lectures.setdefault("lectures", {})[str(day_num)] = lecture_entry
+        github_put(lfname, site_token, lectures, lsha, f"LLB5 {subject} day {day_num}: {entry_meta['topic'][:50]}", timeout=20)
+
+        return jsonify({"ok": True, "subject": subject, "day": day_num, "topic": entry_meta["topic"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 
 
