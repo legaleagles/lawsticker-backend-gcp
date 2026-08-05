@@ -755,6 +755,7 @@ LLB5_SUBJECTS = {
     "cpc": {
         "name": "Civil Procedure Code & Law of Limitation",
         "short": "CPC & Limitation",
+        "semester": 5,
         "units": {
             "Unit I": "Codification of Civil Procedure and Introduction to CPC — Principal features of the Civil Procedure Code — Suits — Parties to Suit — Framing of Suit — Institution of Suits — Bars of Suit — Doctrines of Sub Judice and Res Judicata — Place of Suing — Transfer of suits — Territorial Jurisdiction — 'Cause of Action' and Jurisdictional Bars — Summons — Service of Foreign summons.",
             "Unit II": "Pleadings — Contents of pleadings — Forms of Pleading — Striking out/Amendment of Pleadings — Plaint — Essentials of Plaint — Return of Plaint — Rejection of Plaint — Production and marking of Documents — Written Statement — Counterclaim — Set off — Application of Sec.89 — Framing of issues.",
@@ -766,6 +767,7 @@ LLB5_SUBJECTS = {
     "bnss": {
         "name": "Bharatiya Nagarik Suraksha Sanhita, Juvenile Justice & Probation of Offenders",
         "short": "BNSS & Juvenile Justice",
+        "semester": 5,
         "units": {
             "Unit I": "BNSS — Object and Importance — Comparison with Cr.P.C, 1973 — Definitions — Difference between Cognizable and Non-Cognizable Offences — Bailable and Non-Bailable Offences — Investigation, Inquiry and Trial — Classification of Criminal Courts, Jurisdiction and Powers — Directorate of Prosecution — role of Prosecutors under BNSS — Role of Defence Lawyer — Role of Prisons and Correctional Methods — Indian Constitution and BNSS.",
             "Unit II": "Maintenance of Wife, Children and Parents (Sec.144-147) — Security for Keeping Peace and Good Behaviour (Sec.125-143) — Cognizance by police — Role of Police under BNSS — Preventive Action of Police — Unlawful Assembly — Public Nuisance — Urgent Cases of Nuisance (Sec.148-172) — Information to Police — FIR (Sec.173-196) — Arrest of Persons (Sec.35-62) — Arrest with/without Warrant — Rights of Arrested Person — Proclamation and Attachment of Property (Sec.63-93) — Process to Compel Production of Things (Sec.94-110).",
@@ -777,6 +779,7 @@ LLB5_SUBJECTS = {
     "banking": {
         "name": "Law of Banking and Negotiable Instruments",
         "short": "Banking & NI Act",
+        "semester": 5,
         "units": {
             "Unit I": "History of the Banking Regulation Act — Salient features — Banking Business and its importance in modern times — Different kinds of Banking — impact of Information Technology on Banking.",
             "Unit II": "Relationship between Banker and Customer — Debtor and Creditor Relationship — Fiduciary Relationship — Trustee and Beneficiary — Principal and Agent — Bailor and Bailee — Guarantor.",
@@ -788,6 +791,7 @@ LLB5_SUBJECTS = {
     "adr": {
         "name": "Alternate Dispute Resolution",
         "short": "ADR",
+        "semester": 5,
         "units": {
             "Unit I": "Alternate Dispute Resolution — Characteristics — Advantages and Disadvantages — Unilateral, Bilateral, Triadic (Third Party) Intervention — Techniques and processes — Negotiation, Conciliation, Mediation, Arbitration — Distinction between Arbitration, Conciliation and Negotiation — ADR under different laws in India.",
             "Unit II": "The Arbitration and Conciliation Act, 1996 — Historical Background and Objectives — Amendment Acts 2015 & 2019 — Definitions of Arbitration, Arbitrator, Arbitration Agreement — Appointment/Termination of Arbitrator — Proceedings in Arbitral Tribunal — Arbitral Award — Setting aside of Award — Finality and Enforcement — Conciliation — Appointment/Powers of Conciliators — Arbitration Council of India (ACI) — International Commercial Arbitration — UNCITRAL Model Law 1985 — Geneva Convention 1927 — New York Convention 1958 — Recognition and Enforcement of Foreign Award — Singapore Convention on Mediation 2019 — Online Dispute Resolution.",
@@ -797,11 +801,280 @@ LLB5_SUBJECTS = {
     "ethics": {
         "name": "Professional Ethics and Professional Accounting System",
         "short": "Professional Ethics",
+        "semester": 5,
         "units": {
             "Unit I": "Development of Legal Profession in India — The Advocates Act, 1961 — Right to Practice — Constitutional guarantee under Article 19(1)(g) — Enrolment and Practice — Latest BCI Rules — All India Bar Examination (AIBE) — Advocates and Solicitors' firm — Elements of Advocacy.",
             "Unit II": "Seven lamps of advocacy — Advocate's duties towards public, clients, court, and other advocates and legal aid — Bar Council of India's Code of Ethics.",
             "Unit III": "Disciplinary proceedings — Professional misconduct — Disqualifications — Functions of Bar Council of India/State Bar Councils — Disciplinary Committees — Powers and functions — Disqualification and removal from rolls.",
             "Unit IV": "Professional Accounting — Accountancy for Lawyers — Nature and functions of accounting — Important branches of accounting — Accounting and Law — Bar Bench Relations."
+        }
+    },
+
+    # ---------------- SEMESTER I ----------------
+    "s1-contract1": {
+        "name": "Law of Contract – I", "short": "Contract-I", "semester": 1,
+        "units": {
+            "Unit I": "Definition and essentials of a valid Contract — Definition and essentials of a valid Offer — Definition and essentials of valid Acceptance — Communication of Offer and Acceptance — Revocation of Offer and Acceptance through various modes including electronic medium — Consideration — salient features — Exception to consideration — Doctrine of Privity of Contract — Exceptions to the privity of contract — Standard form of Contract.",
+            "Unit II": "Capacity of the parties — Effect of Minor's Agreement — Contracts with insane persons and persons disqualified by law — Concepts of Free Consent — Coercion — Undue influence — Misrepresentation — Fraud — Mistake — Lawful Object — Immoral agreements and various heads of public policy — illegal agreements — Uncertain agreements — Wagering agreements — Contingent contracts — Void and Voidable contracts.",
+            "Unit III": "Discharge of Contracts — By performance — Appropriation of payments — Performance by joint promisors — Discharge by Novation — Remission — Accord and Satisfaction — Discharge by impossibility of performance (Doctrine of Frustration) — Discharge by Breach — Anticipatory Breach — Actual breach.",
+            "Unit IV": "Quasi Contract — Necessaries supplied to a person who is incapable of entering into a contract — Payment by an interested person — Liability to pay for non-gratuitous acts — Rights of finder of lost goods — Things delivered by mistake or coercion — Quantum merit — Remedies for breach of contract — Kinds of damages — liquidated and unliquidated damages and penalty — Duty to mitigate.",
+            "Unit V": "Specific Relief Act including 2018 Amendment — Recovering possession of property — Specific performance of the contract — Rectification of instruments — Rescission of contracts — Cancellation of instruments — Declaratory Decrees — Preventive Relief Injunctions — Temporary and Perpetual injunctions — Mandatory & Prohibitory injunctions — Injunctions to perform negative agreement — Limited liability partnership (LLP) — Special provision for contracts relating to infrastructure projects — Arbitration clause — Impact of COVID-19 on 'specific performance of contracts'."
+        }
+    },
+    "s1-familylaw1": {
+        "name": "Family Law – I (Hindu Law)", "short": "Family Law-I", "semester": 1,
+        "units": {
+            "Unit I": "Sources of Hindu Law — Scope and application of Hindu Law — Schools of Hindu Law — Mitakshara and Dayabhaga Schools — Concept of Joint Family, Coparcenary, Joint Family Property and Coparcenary Property — Institution of Karta — Powers and Functions of Karta — Pious Obligation — Partition — Debts and alienation of property.",
+            "Unit II": "Marriage — Definition — Importance of institution of marriage under Hindu Law — Conditions of Hindu Marriage — Ceremonies and Registration — Monogamy — Polygamy — Recent Trends in the institution of marriage.",
+            "Unit III": "Matrimonial Remedies under the Hindu Marriage Act, 1955 — Restitution of Conjugal Rights — Nullity of marriage — Judicial separation — Divorce — Maintenance pendente lite — importance of conciliation — Role of Family Courts in Resolution of matrimonial disputes.",
+            "Unit IV": "Concept of Adoption — Historical perspectives of adoption in India — In country and inter-country adoptions — Law of Maintenance — Law of Guardianship — The Hindu Adoption and Maintenance Act, 1956 — The Hindu Minority and Guardianship Act 1956.",
+            "Unit V": "Succession — Intestate succession — Succession to property of Hindu Male and Female — Dwelling House — Hindu Succession Act, 1956 as amended by Hindu Succession (Andhra Pradesh Amendment) Act, 1986 & the Hindu Succession (Amendment) Act, 2005 — Notional Partition — Classes of heirs — Enlargement of limited estate of women into their absolute estate — Daughter's right to inherit ancestral property and impact of recent changes in law."
+        }
+    },
+    "s1-constlaw1": {
+        "name": "Constitutional Law – I", "short": "Constitutional Law-I", "semester": 1,
+        "units": {
+            "Unit I": "Constitution — Meaning and Significance — Evolution of Modern Constitutions — Classification of Constitutions — Indian Constitution — Historical Perspectives — Government of India Act, 1919 — Government of India Act — Framing of Indian Constitution — Role of Drafting Committee of the Constituent Assembly.",
+            "Unit II": "Nature and Salient Features of Indian Constitution — Preamble to Indian Constitution — Union and its Territories — Citizenship — General Principles relating to Fundamental Rights (Art.13) — Definition of State — Doctrine of Judicial Review.",
+            "Unit III": "Right to Equality (Art.14-18) — Freedoms and Restrictions under Art.19 — Protection against Ex-post facto law — Guarantee against Double Jeopardy — Privilege against Self-incrimination — Right to Life and Personal Liberty — Right to Education — Protection against Arrest and Preventive Detention.",
+            "Unit IV": "Rights against Exploitation — Right to Freedom of Religion — Cultural and Educational Rights — Right to Constitutional Remedies — Limitations on Fundamental Rights (Art.31-A, 31-B, 31-C, 335, 358 & 359).",
+            "Unit V": "Directive Principles of State Policy — Significance — Nature — Classification — Application and Judicial Interpretation — Relationship between Fundamental Rights and Directive Principles — Fundamental Duties: Significance, Enforceability and Judicial Interpretation."
+        }
+    },
+    "s1-torts1": {
+        "name": "Law of Torts including Motor Vehicle Accidents and Consumer Protection Laws", "short": "Torts & Consumer Law", "semester": 1,
+        "units": {
+            "Unit I": "Nature of Law of Torts — Definition of Tort — Elements of Tort — Development of Law of Torts in England and India — Wrongful Act and Legal Damage — Damnum Sine Injuria and Injuria Sine Damno — Tort distinguished from Crime and Breach of Contract — General Principles of Liability in Torts — Fault — Wrongful intent — Malice — Negligence — Liability without fault — Statutory liability — Parties to proceedings.",
+            "Unit II": "General Defences to an action in Torts — Vicarious Liability — Liability of the State for Torts — Defence of Sovereign Immunity — Joint Liability — Liability of Joint Tortfeasors — Rule of Strict Liability (Rylands v Fletcher) — Rule of Absolute Liability (M.C. Mehta v. Union of India) — Occupiers liability — Extinction of liability — Waiver and Acquiescence — Release — Accord and Satisfaction — Death.",
+            "Unit III": "Specific Torts — Torts affecting the person — Assault — Battery — False Imprisonment — Malicious Prosecution — Nervous Shock — Torts affecting Immovable Property — Trespass to land — Nuisance — Public Nuisance and Private Nuisance — Torts relating to movable property — Liability arising out of accidents (Relevant provisions of the Motor Vehicles Act).",
+            "Unit IV": "Defamation — Negligence — Torts against Business Relations — Injurious falsehood — Negligent Misstatement — Passing off — Conspiracy — Torts affecting family relations — Remedies — Judicial and Extra-judicial Remedies — Damages — Kinds of Damages — Assessment of Damages — Remoteness of damage — Injunctions — Death in relation to tort — Actio personalis moritur cum persona.",
+            "Unit V": "Consumer Laws: Common Law and the Consumer — Duty to take care and liability for negligence — Consumerism — Salient features of the Consumer Protection Act, 1986 — Consumer Protection Act, 2019 — Definition of Consumer — Rights of Consumers — Defects in goods and deficiency in services — Restrictive and Unfair Trade Practices — Redressal Machinery under the Consumer Protection Act — Consumer Protection Councils — Central Consumer Protection Authority (CCPA) — Liability of Service Providers, Manufacturers and Traders — Product Liability — Consumer Disputes Redressal Commissions: Jurisdiction and Powers — Procedure for filing a consumer dispute — E-filing — Continuous cause of action — Civil & Criminal liability — ADR & consumer — Penalties for misleading advertisement — Mediation under the Act."
+        }
+    },
+    "s1-envlaw1": {
+        "name": "Environmental Law", "short": "Environmental Law", "semester": 1,
+        "units": {
+            "Unit I": "The meaning and definition of environment — Ecology — Ecosystems — Biosphere — Biomes — Ozone depletion — Global Warming — Climatic changes — Need for the preservation, conservation and protection of environment — Ancient Indian approach to environment — Environmental degradation and pollution — Kinds, causes and effects of pollution.",
+            "Unit II": "Common Law remedies against pollution — trespass, negligence, and theories of Strict Liability & Absolute Liability — Relevant provisions of I.P.C. and Cr.P.C. and C.P.C. for the abatement of public nuisance in pollution cases — Remedies under Specific Relief Act — Reliefs against smoke and noise — Noise Pollution.",
+            "Unit III": "The law relating to preservation, conservation and protection of forests, wild life and endangered species, marine life, coastal ecosystems and lakes etc — Prevention of cruelty towards animals — Law relating to prevention and control of water pollution — Air Pollution — Environment (Protection) Act, 1986 — Biological Diversity Act, 2002 — Hazardous Wastes (Management, Handling and Transboundary) Regulations — Environment pollution control mechanism — National Environmental Tribunal and National Environmental Appellate Authority — National Green Tribunal — powers and jurisdiction.",
+            "Unit IV": "Art. 48A and Art. 51A(g) of the Constitution of India — Right to wholesome environment — Right to development — Restriction on freedom of trade, profession, occupation for the protection of environment — Immunity of Environment legislation from judicial scrutiny (Art.31C) — Legislative powers of the Centre and State Government — Writ jurisdiction — Role of Indian Judiciary in the evolution of environmental jurisprudence — Role of green belt development.",
+            "Unit V": "International Environmental Regime — Transactional Pollution — State Liability — Customary International Law — Liability of Multinational corporations/Companies — Stockholm Declaration on Human Environment 1972 — Role of UNEP — Ramsar Convention 1971 — Bonn Convention (Migratory Birds) 1992 — Nairobi Convention 1982 (CFCC) — Biodiversity Convention (Earth Summit) 1992 — Kyoto Protocol 1997 — Johannesburg Convention 2002 — UN Framework Convention on Climate Change (UNFCCC) — UN Climate Change Conference (COP21) & Paris Agreement 2016."
+        }
+    },
+
+    # ---------------- SEMESTER II ----------------
+    "s2-contract2": {
+        "name": "Law of Contract – II", "short": "Contract-II", "semester": 2,
+        "units": {
+            "Unit I": "Indemnity and Guarantee — Contract of Indemnity, definition — Rights of Indemnity holder — Liability of the indemnified — Contract of Guarantee — Definition — Essential characteristics — Distinction between Indemnity and Guarantee — Kinds of Guarantee — Rights and liabilities of Surety — Discharge of surety — Contract of Bailment — Definition — Essential requisites — Kinds of bailment — Rights and duties of bailor and bailee — Termination of bailment — Pledge — Definition — Rights and duties of Pawnor and Pawnee — Pledge by non-owner.",
+            "Unit II": "Contract of Agency — Definition of Agent — Creation of Agency — Rights and duties of Agent — Delegation of authority — Personal liability of agent — Relations of principal and agent with third parties — Termination of Agency.",
+            "Unit III": "Contract of Sale of Goods — Formation of contract — Subject matter of sale — Conditions and Warranties — Express and implied conditions and warranties — Pricing — Caveat Emptor — Hire Purchase Agreements.",
+            "Unit IV": "Property — Possession and Rules relating to passing of property — Sale by non-owner — Nemo dat quod non habet — Delivery of goods — Rights and duties of seller and buyer before and after sale — Rights of unpaid seller — Remedies for breach.",
+            "Unit V": "Contract of Partnership — Definition and nature of partnership — Formation of partnership — Test of partnership — Partnership and other associations — Registration of firm — Effect of non-registration — Relations of partners — Rights and duties of partners — Property of firm — Relation of partners to third parties — Implied authority of partners — Kinds of partners — Minor as partner — Reconstitution of firm — Dissolution of firm — Limited Liability Partnership (LLP)."
+        }
+    },
+    "s2-familylaw2": {
+        "name": "Family Law – II (Muslim Law and Other Personal Laws)", "short": "Family Law-II", "semester": 2,
+        "units": {
+            "Unit I": "Origin and development of Muslim Law — Sources of Muslim Law — Schools of Muslim Law — Difference between the Sunni and Shia Schools — Sub-schools of Sunni Law — Operation and application of Muslim Law — Conversion to Islam — Effects of conversion — Law of Marriage — Essential requirements of valid Marriage — Kinds of Marriages — distinction between void, irregular and valid marriage — Dower (Mahr) — origin, nature, importance and classification of dower — The Muslim Women (Protection of Rights on Marriage) Act, 2019.",
+            "Unit II": "Divorce — Classification of divorce — different modes of Talaq — Legal consequences of divorce — Validity of Triple Talaq: Judicial Interpretation and Legislative Response — Dissolution of Muslim Marriages Act, 1939 and its Amendment — Maintenance: Principles of maintenance & persons entitled — The Muslim Women (Protection of Rights on Divorce) Act, 1986 — Effect of conversion on maintenance and difference between Shia and Sunni Law.",
+            "Unit III": "Parentage — Maternity and Paternity — Legitimacy and acknowledgment — Guardianship — Meaning — Kinds of guardianship — Removal of guardian — Difference between Shia and Sunni Law — Gift — Definition — Requisites of valid gift — Gift formalities — Revocation of gift — Kinds of gift — Wills: Meaning, Requisites of valid Will, Revocation of Will — Distinction between Will and Gift — Difference between Shia and Sunni Law.",
+            "Unit IV": "Waqf — Definition — Essentials of Waqf — Kinds of Waqf — Creation of Waqf — Revocation of Waqf — Salient features of the Waqf Act, 1995 — Recent Changes in Waqf Laws and impact — Mutawalli — Powers and duties of Mutawalli — Removal of Mutawalli and Management of Waqf property — Succession — Administration — Waqf Tribunals and Jurisdiction.",
+            "Unit V": "Special Marriage Act, 1954 — Salient features of Indian Divorce Act — Domicile — Maintenance to dependents/Spouses — Intestate succession of Christians under the Indian Succession Act, 1925."
+        }
+    },
+    "s2-constlaw2": {
+        "name": "Constitutional Law – II", "short": "Constitutional Law-II", "semester": 2,
+        "units": {
+            "Unit I": "Legislature under Indian Constitution — Union and State Legislatures — Composition, Powers, Functions and Privileges — Anti-Defection Law — Executive under Indian Constitution — President and Union Council of Ministers — Governor and State Council of Ministers — Powers and position of President and Governor.",
+            "Unit II": "Judiciary under Constitution — Supreme Court — Appointment of Judges, Powers and Jurisdiction — High Courts — Appointment and Transfer of Judges — Powers and Jurisdiction — Subordinate Judiciary — Independence of judiciary — Judicial Accountability.",
+            "Unit III": "Centre State Relations — Cooperative and Competitive Federalism — Legislative, Administrative and Financial Relations — Cooperation and Coordination between the Centre and States — Judicial Interpretation of Centre-State Relations — Local Self Government under 73rd and 74th Amendments, 1992.",
+            "Unit IV": "Liability of State in Torts and Contracts — Freedom of Interstate Trade, Commerce and Intercourse — Services under the State — All India Services — Public Service Commissions — Election Commissions.",
+            "Unit V": "Emergency — Need of Emergency Powers — Different kinds of Emergency — National, State and Financial emergency — Impact of Emergency on Federalism and Fundamental Rights — Amendment of Indian Constitution and Basic Structure Theory."
+        }
+    },
+    "s2-crimes1": {
+        "name": "Law of Crimes", "short": "Law of Crimes", "semester": 2,
+        "units": {
+            "Unit I": "Concept of crime — Meaning of Crime — Distinction between Crime and Tort — Stages of Crime — Intention, Preparation, Attempt and Commission of Crime — Elements of Crime — Actus Reus and Mens Rea — Codification of Law of Crimes in India — IPC 1860 — Application of the Bharatiya Nyaya Sanhita, 2023 (Sec.1-3) — Territorial and Extra-Territorial Application (Sec.1) — Definition (Sec.2) — Punishments (Sec.4-13).",
+            "Unit II": "General Explanations — General Exceptions under BNS 2023 — Abetment — Criminal Conspiracy — Attempt — Offences against Women and Child (Sec.63-87) — Sexual Offences — Assault and Criminal Force against Women — Offences relating to Marriage — Kidnapping and Abduction — Causing Miscarriage — Offences against Child (Sec.88-99).",
+            "Unit III": "Offences affecting Human Life (Sec.100-113) — Culpable Homicide and Murder — Causing Death by Negligence — Organised Crime — Petty Organised Crime — Terrorist Act — Offences affecting Human Body (Sec.114-144) — Hurt and Grievous Hurt — Wrongful restraint and Wrongful confinement — Criminal Force and Assault — Kidnapping and Abduction.",
+            "Unit IV": "Offences against the State — Offences Relating to Army, Navy and Air Force — Offences relating to Election — Offences Relating to Coin, Currency-Notes, Bank-Notes, and Government Stamps — Offences against Public Tranquillity — Offences by or relating to Public Servants — Contempt of Lawful Authorities of Public Servants — False Evidence and Offences against Public Justice — Offences affecting the Public Health, Safety, Convenience, Decency and Morals.",
+            "Unit V": "Offences relating to Religion — Offences against Property — Theft — Extortion — Robbery & Dacoity — Cheating — Mischief — Criminal Trespass — Criminal Misappropriation of Property and Criminal Breach of Trust — Receiving Stolen Property — Offences relating to Documents and Property Marks — Criminal Intimidation, Insult, Annoyance, Defamation. (Note: Comparative study of IPC 1860 and BNS 2023 wherever necessary.)"
+        }
+    },
+    "s2-evidence1": {
+        "name": "Law of Evidence", "short": "Law of Evidence", "semester": 2,
+        "units": {
+            "Unit I": "Bharatiya Sakshya Adhiniyam, 2023 — Salient Features — Meaning and Kinds of Evidence — Interpretation Clause — Documents, May Presume, Shall Presume and Conclusive Proof — Fact, Fact in Issue and Relevant Facts, Proved, Disproved — Distinction Between Relevancy and Admissibility — Doctrine of Res Gestae — Motive, Preparation and Conduct — Conspiracy — When Facts Not Otherwise Relevant Become Relevant — Right and Custom — Facts Showing the State of Mind.",
+            "Unit II": "Admissions & Confessions — General Principles — Differences between 'Admission' and 'Confession' — Confessions obtained by inducement, threat or promise — Confessions made to police officer — Statement made in custody leading to discovery of incriminating material — Admissibility of Confessions by one accused against co-accused — Dying Declarations and their evidentiary value — Other Statements by persons who cannot be called as Witnesses — Admissibility of evidence in previous judicial proceedings.",
+            "Unit III": "Relevancy of Judgments — Opinion of witnesses — Expert's opinion — Opinion on Relationship, proof of marriage — Facts which need not be proved — Oral and Documentary Evidence — Primary, electronic or digital record — admissibility of electronic records and Secondary evidence — Modes of proof of execution of documents — Presumptions as to documents — Exclusion of Oral by Documentary Evidence — Relevance of social media in the law of evidence.",
+            "Unit IV": "Rules relating to Burden of Proof — Presumption as to Dowry Death — Estoppels — Kinds of estoppels — Res Judicata, Waiver and Presumption.",
+            "Unit V": "Competency to testify — Privileged communications — Testimony of Accomplice — Examination in Chief, Cross examination and Re-examination — Leading questions — Lawful questions in cross examination — Compulsion to answer questions — Hostile witness — Impeaching the credit of witness — Refreshing memory — Questions of corroboration — Improper admission and rejection of evidence. (Comparative study of Indian Evidence Act 1872 and BSA 2023 wherever necessary.)"
+        }
+    },
+
+    # ---------------- SEMESTER III ----------------
+    "s3-jurisprudence": {
+        "name": "Jurisprudence", "short": "Jurisprudence", "semester": 3,
+        "units": {
+            "Unit I": "Meaning and Definition of Jurisprudence — General and Particular Jurisprudence — Elements of Ancient Indian Jurisprudence — Schools of Jurisprudence — Analytical, Historical, Philosophical and Sociological Schools — Theories of Law — Meaning and Definition of Law — Nature and Function of Law — Purpose of Law — Classification of Law — Equity, Law and Justice — Theory of Sovereignty.",
+            "Unit II": "Sources of Law — Legal and Historical Sources — Legislation — Classification of legislation — Supreme and Subordinate Legislation — Direct and Indirect Legislation — Principles of Statutory Interpretation — Precedent — Kinds of Precedent — Stare Decisis — Original and Declaratory Precedents — Authoritative and Persuasive Precedents — Custom — Kinds of Custom — Requisites of a valid custom — Relative merits and demerits of Legislation, Precedent and Custom — Codification: Concept, Advantages and disadvantages.",
+            "Unit III": "Persons — Nature of personality — Legal Status of Lower Animals, Dead Persons and Unborn persons — Legal Persons — Corporations — Purpose of Incorporation — Nature of Corporate Personality — Rights and Duties — Definition of Right — Classification of Rights and Duties — Absolute and Relative Rights and Duties — Rights and Cognate concepts like Liberty, Power, Immunity, Privilege.",
+            "Unit IV": "Obligation — Nature of Obligation — Obligation arising out of Contract, Quasi Contract, trust and breach of obligation — Liability — Nature and kinds of liability — Acts — Mens Rea — Intention and Motive — Relevance of Motive — Negligence — Strict Liability — Accident — Vicarious Liability — measure of Civil and Criminal Liability.",
+            "Unit V": "Ownership — Definition and kinds of Ownership — Possession — Elements of Possession — Relation between Ownership and Possession — Possessory Remedies — Property — Meaning — Kinds of Property — Modes of Acquisition of Property — Legal Sanctions — Meaning and Classification of Sanctions — Civil and Criminal Justice — Concept of Justice — Theories regarding purpose of Criminal Justice — Deterrent, Preventive, Reformative and Retributive theories."
+        }
+    },
+    "s3-property1": {
+        "name": "Law of Property", "short": "Property Law", "semester": 3,
+        "units": {
+            "Unit I": "Meaning and concept of property — Kinds of property — Transfer of property — Transferable and non-transferable property — Who can transfer — Operation of transfer — Mode of transfer — Conditional transfer — Void and unlawful conditions — Condition precedent and condition subsequent — Vested and contingent interest — Transfer to unborn persons.",
+            "Unit II": "Doctrine of Election — Covenants — Transfer by ostensible owner — Doctrine of Feeding the Grant by Estoppel — Doctrine of Lis Pendens — Fraudulent Transfers — Doctrine of Part-performance.",
+            "Unit III": "Sale: Essential features, Mode of Sale, Rights and liabilities of parties — Mortgage: Kinds of Mortgages — Rights and liabilities of mortgagor and mortgagee — Marshalling and Contribution — Charges.",
+            "Unit IV": "Lease — Essential features — Kinds of leases — Rights and liabilities of lessor and lessee — Termination of lease — forfeiture — Exchange — Gifts — Different types of gifts — Registration of Gifts — Transfer of Actionable Claims.",
+            "Unit V": "Easements: Definition, Distinction between Lease and License — Dominant and Servient Tenements — Acquisition of property through testamentary succession — Will — Codicil — Capacity to execute Will — Nature of bequests — Executors of Will — Rights and Obligations of Legatees."
+        }
+    },
+    "s3-adminlaw": {
+        "name": "Administrative Law", "short": "Administrative Law", "semester": 3,
+        "units": {
+            "Unit I": "Nature and scope of Administrative Law — Meaning, Definition and Evolution — Reasons for the growth of Administrative Law — Relationship between Administrative Law and Constitutional Law.",
+            "Unit II": "Basic concepts of Administrative Law — Rule of Law — Interpretation of Dicey's Principle of Rule of Law — Modern trends — Theory of Separation of Powers — Position in India, UK and USA.",
+            "Unit III": "Classification of Administrative functions: Legislative, Quasi-judicial, Administrative and Ministerial functions — Delegated Legislation: Meaning, Reasons for growth, Classification — Judicial, Legislative and Procedural Control of Delegated legislation.",
+            "Unit IV": "Judicial Control of Administrative Action — Grounds of Judicial Control — Principles of Natural Justice — Administrative discretion and its control — Wednesbury Principle (Doctrine of Proportionality) — Doctrine of Legitimate Expectation.",
+            "Unit V": "Remedies available against the State — Writs — Lokpal and Lokayukta — Right to Information — Liability of the State in Torts and Contracts — Rule of Promissory Estoppel — Administrative Tribunals — Commissions of Inquiry — Public Corporations."
+        }
+    },
+    "s3-companylaw": {
+        "name": "Company Law", "short": "Company Law", "semester": 3,
+        "units": {
+            "Unit I": "Corporate Personality — General Principles of Company Law — Nature and Definition of Company — Private Company and Public Company — One Person Company — Characteristics of a Company — Different kinds of Company — Registration & Incorporation — Lifting the Corporate Veil — Company distinguished from Partnership, HUF and LLP.",
+            "Unit II": "Promoters — Memorandum of Association — Doctrine of Ultra Vires — Articles of Association — Doctrine of Indoor Management — Prospectus — Civil and Criminal liability, Compounding of offences under Sec.441, decriminalization — Liability for misstatement in prospectus — Statement in lieu of Prospectus — Pre-incorporation Contracts — Membership in a Company — Borrowing Powers — Debentures & Charges — insider trading of company shares.",
+            "Unit III": "Shares & Stock — Kinds of shares — Statutory restrictions on allotment of shares — Intermediaries — Call on shares — Transfer and Transmission of shares — Reduction on transfer of shares — Rectification of register on transfer — Certification and issue of certificate of transfer — Limitation of time for issue of certificates.",
+            "Unit IV": "Directors — women director — Independent director — Different kinds of Directors — Appointment, position, qualifications and disqualifications — Powers, Rights and Duties of Directors — Meetings and proceedings — kinds of meetings — Statutory meeting — Annual General Meeting — Extraordinary meeting — Power of the Tribunal to order meeting — Chairman for meetings — Proxy — Resolutions — Minutes — Shareholders Activism — Corporate Social Responsibility.",
+            "Unit V": "Accounts and Audit — Inspection and Investigation — Compromises, Reconstruction and Amalgamation — Majority rule and Rights of minority shareholders — Prevention of oppression and mismanagement — class action — Revival and rehabilitation of sick industrial companies — Mergers, Amalgamation and Takeover — Winding up of companies — Modes and consequences of winding up — Insolvency and Bankruptcy Code, 2016 in relation to winding up — Authorities: NCLAT, NCLT, ROC, SFIO — Corporate governance and pandemic-related relaxations."
+        }
+    },
+    "s3-labourlaw1": {
+        "name": "Labour Law – I (Trade Union Laws and Industrial Dispute Act)", "short": "Labour Law-I", "semester": 3,
+        "units": {
+            "Unit I": "Concept of Labour through the ages — Trade Unions: History of Trade Union Movement — Trade Unions according to Industrial Relations Code 2020 — Definitions — Registration — Rights and Liabilities of Registered Trade Union — Immunities — Amalgamation and Dissolution of unions — Reorganization of Trade Unions.",
+            "Unit II": "Prevention and Settlement of Industrial Disputes in India — Role of State in Industrial Relations under new Industrial Relations Code 2020 — Definition of industry, Industrial Dispute — Individual Dispute — Workmen — special provisions relating to Lay-Off, Retrenchment, Closure, Award, Strike, Lockout under Chapter X.",
+            "Unit III": "Authorities under the ID Code — Works Committee — Conciliation — Limitation to raise dispute — Court of Inquiry — Tribunals — Powers and Functions of Authorities — Voluntary Arbitration — Alteration of conditions of service — Management rights of action during pendency of proceedings — Recovery of money due from employer — Unfair labour practices — miscellaneous provisions.",
+            "Unit IV": "Standing Orders — concept and Nature — Certification process — operation and binding effect — modification and Temporary application of Model Standing Orders — Interpretation and enforcement of Standing Orders and provisions in the Industrial Relations Code 2020.",
+            "Unit V": "Disciplinary proceedings in Industries — Termination of employment and notice thereof — Suspension or dismissal for misconduct, acts or omissions which constitute misconduct — Means of redress for workers against unfair treatment or wrongful executions."
+        }
+    },
+
+    # ---------------- SEMESTER IV ----------------
+    "s4-labourlaw2": {
+        "name": "Labour Law – II", "short": "Labour Law-II", "semester": 4,
+        "units": {
+            "Unit I": "Wages — Concepts — Minimum, Fair, Living Wages — Wage and Industrial Policies — Whitley Commission Recommendations — Provisions of Code on Wages 2019 — Timely payment of wages — Authorized deductions — Claims — Minimum Wages under the Code — Definitions — Types of wages — Procedure for fixing and revising Minimum Wages — Remedy.",
+            "Unit II": "Bonus — concept — Right to claim Bonus — Full Bench formula — Payment of Bonus under the Code on Wages 2019 — Computation of gross profit, available/allocable surplus — Eligibility, Disqualification of Bonus — set on/set off — Minimum and Maximum Bonus — Recovery of Bonus.",
+            "Unit III": "Employees Security and Welfare — Social Security — Concept — Social Insurance — Social Assistance Schemes — Law relating to workmen's compensation — Employee's Compensation Act 1923 — Employer's liability — Nexus between injury and employment — Employees State Insurance Act 1948 — Application, Benefits, Adjudication of disputes — ESI Corporation.",
+            "Unit IV": "Employees Provident Fund and Miscellaneous Provisions Act 1952 — Contributions, Schemes, Benefits — Maternity Benefit (Amendment) Act, 2018 — Definitions, Application, Benefits — Payment of Gratuity Act 1972 — Definitions, application, payment of gratuity eligibility, forfeiture, Nomination, Controlling authorities.",
+            "Unit V": "The Factories Act 1948 — Chapters dealing with Health, Safety and Welfare of Labour — Child Labour — Rights of child and the Indian Constitution — Child Labour (Prohibition and Regulation) Act 1986 — Equal Remuneration Act, 1976."
+        }
+    },
+    "s4-pil": {
+        "name": "Public International Law", "short": "Public International Law", "semester": 4,
+        "units": {
+            "Unit I": "Definition, Nature, Scope and Importance of International Law — Relation of International Law to Municipal Law — Sources of International Law — Codification.",
+            "Unit II": "State Recognition — State Succession — Responsibility of States for International delinquencies — State Territory — Modes of acquiring State Territory.",
+            "Unit III": "Position of Individual in International Law — Nationality — Extradition — Asylum — Privileges and Immunities of Diplomatic Envoys — Treaties — Formation of Treaties — Modes of Consent, Reservation and termination.",
+            "Unit IV": "The Legal Regime of the Seas — Evolution of the Law of the Sea — Freedoms of the High Seas — Common Heritage of Mankind — UN Convention on the Law of the Seas — Legal Regime of Airspace — Paris, Havana, Warsaw and Chicago Conventions — Five Freedoms of Air — Legal Regime of Outer Space — Outer Space Treaty, Rescue Agreement, Liability Convention, Registration Convention, Moon Treaty — India's space missions.",
+            "Unit V": "International Organizations — League of Nations and United Nations — International Court of Justice — International Criminal Court — Specialized agencies of the UN — WHO, UNESCO, ILO, IMF and WTO."
+        }
+    },
+    "s4-interpretation": {
+        "name": "Interpretation of Statutes", "short": "Interpretation of Statutes", "semester": 4,
+        "units": {
+            "Unit I": "Meaning and Definition of Statutes — Classification of Statutes — Meaning and Definition of Interpretation — General Principles of Interpretation — Rules of Construction under the General Clauses Act, 1897.",
+            "Unit II": "Grammatical Rule of Interpretation — Golden Rule of Interpretation — Rule of Interpretation to avoid mischief — 60th and 183rd Reports of Law Commission of India on the General Clauses Act.",
+            "Unit III": "Interpretation of Penal Statutes and Statutes of Taxation — Beneficial Construction — Construction to avoid conflict with other provisions — Doctrine of Harmonious Construction.",
+            "Unit IV": "External Aids to Interpretation — Statement of objects, Legislative debates, identification of legislative purpose — Internal Aids — Preamble, title, interpretation clause, marginal notes, explanations — Presumptions.",
+            "Unit V": "Effect of Repeal — Effect of amendments to statutes — Conflict between parent legislation and subordinate legislation — Methods of interpreting substantive and procedural laws."
+        }
+    },
+    "s4-landlaws": {
+        "name": "Land Laws", "short": "Land Laws", "semester": 4,
+        "units": {
+            "Unit I": "Classification of lands — Ownership of Land — Absolute and limited ownership (tenancy, lease etc.) — Doctrine of Eminent Domain — Doctrine of Escheat — Doctrine of Bona Vacantia — Maintenance of land records, Pattas and Title Deeds — Telangana Rights in Land and Pattadar Pass Books Act 2020 — Land Titling (Torrens System): Title Guarantee, Conclusive Title, Title Insurance.",
+            "Unit II": "Law Reforms before and after independence — Zamindari Settlement — Ryotwari Settlement — Mahalwari System — Intermediaries — Constitutional Provisions — Abolition of Zamindaries, Jagirs and Inams — Tenancy Laws — Conferment of ownership on tenants/ryots.",
+            "Unit III": "Laws relating to acquisition of property — Right to Fair Compensation and Transparency in Land Acquisition, Rehabilitation and Resettlement Act, 2013 — Procedure for Land Acquisition: notification, Social Impact Assessment, consent of land owners, award enquiry, payment of compensation, reference to civil courts.",
+            "Unit IV": "Laws relating to Ceiling on Land Holdings — Telangana Land Reforms (Ceiling on Agricultural Holdings) Act, 1973 — Effect of inclusion in the IX Schedule — Interpretation of Directive Principles in relation to land (Articles 38, 39) — Land survey and sub-division — Land Rights under the Scheduled Tribes and Other Traditional Forest Dwellers (Recognition of Forest Rights) Act, 2006.",
+            "Unit V": "Laws relating to alienation — Scheduled Areas Land Transfer Regulation — Telangana Assigned Lands (Prohibition of Transfers) Act 1977 — Resumption of Lands to the Transferor/Government — Role of Special Tribunals and Courts in Resolution of land disputes."
+        }
+    },
+    "s4-ipr": {
+        "name": "Intellectual Property Law", "short": "IP Law", "semester": 4,
+        "units": {
+            "Unit I": "Intellectual Property — Meaning, Nature and Classification — Significance and need of protection — Main forms: Patents, Trademarks, Industrial designs, Geographical Indications, Copyright and Neighbouring Rights — New forms: Plant Varieties Protection and Biotechnology, GRTK, Layout Designs, Computer Programmes, Artificial Intelligence and Intellectual Property.",
+            "Unit II": "Evolution of International Protection of IPRs — Paris Convention 1883 — WCT 1996 — Berne Convention 1886 — Madrid Agreement 1891 and Protocol 1989 — Patent Co-operation Treaty 1970 — WIPO Conventions — TRIPS Agreement 1994 and its impact.",
+            "Unit III": "Copyright: Meaning, Nature, historical evolution — Copyright Act, 1957 — Salient Features — Idea-Expression Dichotomy — Subject matter of Copyright Protection — Neighboring rights — Ownership, Rights of Authors and owners — Assignment — Collective management — Infringement and Criteria — Exceptions — Doctrine of Fair Use — Remedies for infringement.",
+            "Unit IV": "Trademarks and rationale of protection — Trade Marks Act, 1999 — Definition, kinds — Trademarks and Internet Domain Names — Registration, Rights of trademark owners — Passing off — Infringement, Remedies — Industrial designs — Designs Act, 2000 — Definition, characteristics, Registration, rights of design holders — Copyright in design — Remedies for infringement.",
+            "Unit V": "Patents — Concept — Historical overview of Patent Law in India — Patents Act, 1970 — Patentable Inventions — Kinds of Patents — Procedure for obtaining patent in India and abroad — PCT procedure — Rights and obligations of a patentee — Limitations: compulsory licensing, government acquisition, secrecy directions — Infringement and remedies."
+        }
+    },
+
+    # ---------------- SEMESTER VI ----------------
+    "s6-taxlaw": {
+        "name": "Law of Taxation", "short": "Taxation Law", "semester": 6,
+        "units": {
+            "Unit I": "Constitutional basis of power of taxation — Article 265 — Basic concept of Income Tax — Outlines of Income Tax Law — Definition of Income and Agricultural Income — Residential Status — Previous Year — Assessment Year — Computation of Income.",
+            "Unit II": "Heads of Income and Computation — Income from Salary, Income from House Property, Profits and Gains of Business or Profession, Capital Gains, Income from other sources — Taxation Law (Amendment) Act 2019.",
+            "Unit III": "Law and Procedure — PAN — Filing of Returns — Payment of Advance Tax — Deduction of Tax at Source (TDS) — Double Tax Relief — Assessment, Penalties, Prosecution, Appeals and Grievances — Authorities.",
+            "Unit IV": "GST Act 2017 — Introduction, Background, Basic Concepts — Kinds of GST: CGST, SGST, IGST — Administration officers — Levy and collection of tax — Scope of supply — Tax liability on composite/mixed supplies — Input tax credit — Eligibility and conditions.",
+            "Unit V": "GST Act 2017: Registration — persons liable/not liable — procedure — Returns — furnishing of outward/inward supplies — Payment of tax, interest, penalty — TDS/TCS — Demand and Recovery — Advance Ruling — Appeals and revision — Appellate Tribunal — Offences and penalties."
+        }
+    },
+    "s6-itlaw": {
+        "name": "Information Technology Law", "short": "IT Law", "semester": 6,
+        "units": {
+            "Unit I": "Concept of Information Technology and Cyber Space — Interface of Technology and Law — Jurisdiction in Cyber Space vs traditional sense — Internet Jurisdiction — Indian Context — Enforcement agencies — International position — Cases in Cyber Jurisdiction.",
+            "Unit II": "Information Technology Act, 2000 — Aims and Objects — Jurisdiction — Electronic Governance — Legal Recognition of Electronic Records and Evidence — Digital Signature Certificates — Duties of Subscribers — Role of Certifying Authorities — Cyber Regulations Appellate Tribunal — Internet Service Providers and Liability — Powers of Police under the Act.",
+            "Unit III": "E-Commerce — UNCITRAL Model Law — Legal aspects of E-Commerce — Digital Signatures — E-taxation, E-banking, online publishing and online credit card payment — Employment Contracts — Sales, Reseller and Distributor Agreements, Non-Disclosure Agreements — Shrink Wrap Contract, Source Code, Escrow Agreements.",
+            "Unit IV": "Cyber Law and IPRs — Copyright in Information Technology — Software Copyrights vs Patents debate — Authorship and Assignment — Copyright in Internet, Multimedia — Software Piracy — Patents — European/US/Indian positions on Computer related Patents — Trademarks in Internet — Domain name registration, Domain Name Disputes & WIPO — Databases in IT.",
+            "Unit V": "Cyber Crimes — Meaning, Different Kinds — Cyber crimes under BNS, BNSS and BSA 2023 — Cyber crimes under the IT Act 2000 — Hacking, Child Pornography, Cyber Stalking, Denial of Service Attack, Virus Dissemination, Software Piracy, IRC Crime, Credit Card Fraud, Net Extortion, Phishing — Cyber Terrorism — Violation of Privacy — Data Protection and Privacy."
+        }
+    },
+    "s6-optional-women": {
+        "name": "Optional: Law Relating to Women", "short": "Optional — Women", "semester": 6,
+        "units": {
+            "Unit I": "Historical background and status of women in ancient India — Constitutional Provisions and gender justice — Provisions relating to women in Fundamental Rights, Directive Principles and Fundamental Duties — Equal right of women to worship.",
+            "Unit II": "Laws relating to marriage, divorce, succession and maintenance under personal laws with emphasis on women — Special Marriage Act — Maintenance under Cr.P.C 1973/BNSS 2023 — NRI Marriages — Live-in relationships — Uniform Civil Code and gender justice — Personal Laws (Amendment) Act 2019.",
+            "Unit III": "Special provisions relating to women under BSA 2023 — Offences against women under BNS 2023 — outraging modesty — Acid Attacks, sexual harassment, rape, bigamy, mock/fraudulent marriages, adultery decriminalization, causing miscarriage, insulting women — Impact of New Criminal Laws 2023.",
+            "Unit IV": "Socio-Legal position of women — Dowry Prohibition Act 1961 — Medical Termination of Pregnancy Act — misuse of Pre-natal Diagnostic Techniques and Sex selection — Immoral Trafficking law — Domestic Violence law — Sexual Harassment at workplace — Honour Killings.",
+            "Unit V": "Position of women under Maternity Benefit Act and other Labour laws — Position under International instruments — CEDAW, International Covenant on Civil and Political Rights, International Covenant on Social Cultural and Economic Rights."
+        }
+    },
+    "s6-optional-humanrights": {
+        "name": "Optional: Human Rights Law", "short": "Optional — Human Rights", "semester": 6,
+        "units": {
+            "Unit I": "Meaning and definition of Human Rights — Evolution of Human Rights — Human Rights and Domestic Jurisdiction — Classification of Human Rights — Third World Perspectives.",
+            "Unit II": "Adoption of Human Rights by the UN Charter — UN Commission on Human Rights — Universal Declaration of Human Rights — International Covenants on Human Rights (Civil/Political; Economic/Social/Cultural).",
+            "Unit III": "Regional Conventions on Human Rights — European Convention — American Convention — African Charter (Banjul).",
+            "Unit IV": "International Conventions — Genocide Convention, Convention against Torture, CEDAW, Child Rights Convention, Convention on Statelessness, Convention against Slavery, Convention on Refugees — International Conference on Human Rights 1968 — World Conference on Human Rights 1993.",
+            "Unit V": "Human Rights Protection in India — Human Rights Commissions — Protection of Human Rights Act — National Human Rights Commission (NHRC) — State Human Rights Commissions — Human Rights Courts in Districts."
+        }
+    },
+    "s6-optional-investments": {
+        "name": "Optional: Law of Investments and Securities", "short": "Optional — Investments", "semester": 6,
+        "units": {
+            "Unit I": "Administration of Company Law in relation to issue of prospectus and shares — membership and share capital — Kinds of shares — public issue of shares — procedure for issue — allotment of shares — transfer and transmission of shares.",
+            "Unit II": "Debentures — Kinds of Debentures and Charges — Dividend — Inter-Corporate Loans and Investments.",
+            "Unit III": "Basic features of the Security Contracts (Regulation) Act, 1956 — Recognition of Stock Exchanges — Regulation of Contracts and option in securities — Listing of securities — Guidelines for listing of shares/debentures.",
+            "Unit IV": "Basic features of the Security and Exchange Board of India Act, 1992 — Establishment of SEBI — Functions and Powers of SEBI — Powers of the Central Government under the Act — Guidelines for disclosure — Investor Protection — SEBI Appellate Tribunal — Appeals.",
+            "Unit V": "Non-Banking Financial Institutions — Classification and Law Relating to NBFCs — Protection of Depositors Act — Foreign Exchange Management Act."
+        }
+    },
+    "s6-drafting": {
+        "name": "Drafting, Pleadings and Conveyancing", "short": "Drafting & Pleadings", "semester": 6,
+        "units": {
+            "Unit I": "Drafting: Drafting and documentation in civil, criminal and constitutional cases — General Principles of Drafting and relevant Substantive Rules — Distinction between pleadings and conveyancing.",
+            "Unit II": "Pleadings: Essentials and drafting — (i) Civil: Plaint, Written Statement, Memo, Interlocutory Application, Original Petition, Affidavit, Execution Petition, Memorandum of Appeal and Revision. (ii) Petition under Article 226 and 32 — Drafting of Writ Petition and PIL Petition. (iii) Criminal: Complaint, Criminal Miscellaneous Petition, Bail Application, Memorandum of Appeal and Revision.",
+            "Unit III": "Conveyancing: Essentials and drafting of Sale Deed, Mortgage Deed, Lease Deed, Gift Deed, Promissory Note, Power of Attorney, Will and Trust Deed."
         }
     }
 }
@@ -929,6 +1202,11 @@ def llb5_build_topics():
     if subject not in LLB5_SUBJECTS:
         return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
 
+    result = _llb5_build_one_subject_topics(subject, site_token, gemini_key, force)
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+def _llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False):
     try:
         fname = llb5_topics_file(subject)
         try:
@@ -937,7 +1215,7 @@ def llb5_build_topics():
             existing, sha = None, None
 
         if existing and existing.get("topics") and not force:
-            return jsonify({"ok": True, "skipped": True, "reason": "Topic index already exists. Use ?force=1 to regenerate."})
+            return {"ok": True, "subject": subject, "skipped": True, "reason": "Topic index already exists."}
 
         info = LLB5_SUBJECTS[subject]
         prompt = build_llb5_topic_index_prompt(info["name"], info["units"])
@@ -948,13 +1226,13 @@ def llb5_build_topics():
             parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=8000)
         except urllib.error.HTTPError as he:
             body = he.read().decode()
-            return jsonify({"ok": False, "error": f"Gemini error {he.code}: {body[:300]}"}), 502
+            return {"ok": False, "subject": subject, "error": f"Gemini error {he.code}: {body[:300]}"}
         except Exception as ge:
-            return jsonify({"ok": False, "error": f"Generation/parse error: {str(ge)[:300]}"}), 502
+            return {"ok": False, "subject": subject, "error": f"Generation/parse error: {str(ge)[:300]}"}
 
         topics = parsed.get("topics", []) if parsed else []
         if len(topics) < 10:
-            return jsonify({"ok": False, "error": f"Generation produced only {len(topics)} topics, not saving. Try again."}), 502
+            return {"ok": False, "subject": subject, "error": f"Generation produced only {len(topics)} topics, not saving."}
 
         topics.sort(key=lambda t: t.get("day", 0))
         data = {
@@ -966,9 +1244,32 @@ def llb5_build_topics():
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
         github_put(fname, site_token, data, sha, f"Build LLB5 topic index: {subject}", timeout=20)
-        return jsonify({"ok": True, "subject": subject, "topic_count": len(topics)})
+        return {"ok": True, "subject": subject, "topic_count": len(topics)}
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return {"ok": False, "subject": subject, "error": str(e)}
+
+
+@app.route('/api/llb5-build-all-topics', methods=['GET'])
+def llb5_build_all_topics():
+    # ONE click builds the topic index for every subject across every
+    # semester that doesn't have one yet. Existing subjects with an index
+    # already are skipped automatically (no ?force=1 needed) — safe to
+    # re-run any time new subjects are added to LLB5_SUBJECTS.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    results = []
+    for subject in LLB5_SUBJECTS.keys():
+        results.append(_llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False))
+
+    return jsonify({
+        "ok": all(r.get("ok") for r in results),
+        "built": [r["subject"] for r in results if r.get("ok") and not r.get("skipped")],
+        "already_had": [r["subject"] for r in results if r.get("ok") and r.get("skipped")],
+        "failed": [r for r in results if not r.get("ok")],
+    })
 
 
 def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
