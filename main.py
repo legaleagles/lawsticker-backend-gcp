@@ -18,6 +18,7 @@ import base64
 import hashlib
 import io
 import textwrap
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1219,16 +1220,35 @@ def _llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False)
 
         info = LLB5_SUBJECTS[subject]
         prompt = build_llb5_topic_index_prompt(info["name"], info["units"])
-        try:
-            # 45 structured objects in one response needs real headroom —
-            # too low a limit here truncates the JSON mid-array and the
-            # whole call fails, which is why nothing was showing up.
-            parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=8000)
-        except urllib.error.HTTPError as he:
-            body = he.read().decode()
-            return {"ok": False, "subject": subject, "error": f"Gemini error {he.code}: {body[:300]}"}
-        except Exception as ge:
-            return {"ok": False, "subject": subject, "error": f"Generation/parse error: {str(ge)[:300]}"}
+
+        # Gemini's 503 "high demand" is transient — retry with backoff
+        # before giving up, instead of failing on the first busy signal.
+        parsed = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                # 45 structured objects in one response needs real headroom —
+                # too low a limit here truncates the JSON mid-array and the
+                # whole call fails, which is why nothing was showing up.
+                parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=8000)
+                last_error = None
+                break
+            except urllib.error.HTTPError as he:
+                body = he.read().decode()
+                last_error = f"Gemini error {he.code}: {body[:300]}"
+                if he.code == 503 and attempt < 2:
+                    time.sleep(5 * (attempt + 1))  # 5s, then 10s
+                    continue
+                break
+            except Exception as ge:
+                last_error = f"Generation/parse error: {str(ge)[:300]}"
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                break
+
+        if last_error:
+            return {"ok": False, "subject": subject, "error": last_error}
 
         topics = parsed.get("topics", []) if parsed else []
         if len(topics) < 10:
@@ -1251,24 +1271,53 @@ def _llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False)
 
 @app.route('/api/llb5-build-all-topics', methods=['GET'])
 def llb5_build_all_topics():
-    # ONE click builds the topic index for every subject across every
-    # semester that doesn't have one yet. Existing subjects with an index
-    # already are skipped automatically (no ?force=1 needed) — safe to
-    # re-run any time new subjects are added to LLB5_SUBJECTS.
+    # Builds the topic index for subjects that don't have one yet, a small
+    # BATCH at a time (not all ~26 in one long-running request) — Gemini's
+    # 503s happen more under one big burst, and one giant request risks
+    # hitting Cloud Run's own timeout. Safe to just click the same link
+    # repeatedly: already-built subjects are always skipped, so repeated
+    # clicks naturally work through the whole list a few at a time.
+    # Pass ?limit=N to change the batch size (default 5).
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not site_token or not gemini_key:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
+    try:
+        limit = int(request.args.get("limit", 5))
+    except ValueError:
+        limit = 5
+
     results = []
+    processed = 0
     for subject in LLB5_SUBJECTS.keys():
+        if processed >= limit:
+            break
+        # Cheap pre-check so subjects already built don't eat into the
+        # batch limit or add an unnecessary pause.
+        try:
+            existing, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
+        except Exception:
+            existing = None
+        if existing and existing.get("topics"):
+            results.append({"ok": True, "subject": subject, "skipped": True, "reason": "Topic index already exists."})
+            continue
+
         results.append(_llb5_build_one_subject_topics(subject, site_token, gemini_key, force=False))
+        processed += 1
+        if processed < limit:
+            time.sleep(2)  # brief pause between subjects to spread load
+
+    remaining = [s for s in LLB5_SUBJECTS.keys()
+                 if s not in [r["subject"] for r in results]]
 
     return jsonify({
         "ok": all(r.get("ok") for r in results),
         "built": [r["subject"] for r in results if r.get("ok") and not r.get("skipped")],
         "already_had": [r["subject"] for r in results if r.get("ok") and r.get("skipped")],
         "failed": [r for r in results if not r.get("ok")],
+        "remaining_untouched": remaining,
+        "note": "Click this same link again if 'remaining_untouched' is non-empty." if remaining else "All subjects done.",
     })
 
 
