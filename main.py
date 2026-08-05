@@ -3891,9 +3891,123 @@ def youtube_stats():
 
 
 # ---------------------------------------------------------------------------
-# Health check — visit this URL directly in your phone's browser to confirm
-# the whole service deployed and is running, before testing individual routes.
+# GA4 → Telegram daily digest. Reads real GA4 traffic data via the GA4 Data
+# API and sends a summary to Telegram — no need to open Analytics manually.
+#
+# SETUP REQUIRED (one-time, done by you in the Google Cloud/GA4 consoles,
+# not something this code can do on its own):
+#   1. Find your GA4 numeric Property ID: analytics.google.com → Admin →
+#      Property Settings → "Property ID" (a plain number, e.g. 123456789 —
+#      NOT the "G-XXXXXXX" measurement ID used in the site's tracking tag,
+#      that's a different identifier for a different purpose).
+#   2. Find this Cloud Run service's attached service account email:
+#      Cloud Run console → your service → "Security" tab → Service account.
+#      It looks like something@your-project.iam.gserviceaccount.com.
+#   3. In GA4: Admin → Property Access Management → add that exact email
+#      as a user with "Viewer" role. This grants Cloud Run read-only access
+#      to your Analytics data — no API key or credentials file needed,
+#      Cloud Run authenticates as itself automatically.
+#   4. Set the GA4_PROPERTY_ID environment variable on Cloud Run to the
+#      numeric ID from step 1.
 # ---------------------------------------------------------------------------
+
+def _get_gcp_access_token():
+    # Cloud Run's metadata server hands out a short-lived access token for
+    # whichever service account is attached to this service — no key file
+    # needed, this only works when actually running on Cloud Run/GCE.
+    req = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+        headers={"Metadata-Flavor": "Google"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())["access_token"]
+
+
+def _ga4_run_report(property_id, access_token, days=1):
+    body = {
+        "dateRanges": [{"startDate": f"{days}daysAgo", "endDate": "today"}],
+        "dimensions": [{"name": "pagePath"}, {"name": "pageTitle"}],
+        "metrics": [{"name": "screenPageViews"}, {"name": "activeUsers"}],
+        "orderBys": [{"metric": {"metricName": "screenPageViews"}, "desc": True}],
+        "limit": 25,
+    }
+    req = urllib.request.Request(
+        f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
+
+
+@app.route('/api/ga4-daily-digest', methods=['GET'])
+def ga4_daily_digest():
+    # Cron target — once a day is plenty. Pass ?days=N to summarize a
+    # longer window (e.g. ?days=7 for a weekly view instead of yesterday).
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
+    property_id = os.environ.get("GA4_PROPERTY_ID")
+    if not bot_token or not chat_id_config:
+        return jsonify({"ok": False, "error": "Telegram not configured."}), 500
+    if not property_id:
+        return jsonify({"ok": False, "error": "GA4_PROPERTY_ID not set — see setup steps in the code comment above this route."}), 500
+
+    try:
+        days = int(request.args.get("days", 1))
+    except ValueError:
+        days = 1
+
+    try:
+        access_token = _get_gcp_access_token()
+        report = _ga4_run_report(property_id, access_token, days=days)
+    except urllib.error.HTTPError as he:
+        body = he.read().decode()
+        return jsonify({"ok": False, "error": f"GA4 API error {he.code}: {body[:400]}"}), 502
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not fetch GA4 data: {str(e)[:300]}"}), 502
+
+    rows = report.get("rows", [])
+    if not rows:
+        msg = f"📊 <b>Site traffic — last {days} day(s)</b>\n\nNo traffic recorded in this window."
+    else:
+        total_views = sum(int(r["metricValues"][0]["value"]) for r in rows)
+        total_users = sum(int(r["metricValues"][1]["value"]) for r in rows)
+
+        eklavya_rows = [r for r in rows if "eklavya" in r["dimensionValues"][0]["value"].lower()]
+        other_rows = [r for r in rows if r not in eklavya_rows][:10]
+
+        period_label = "yesterday" if days == 1 else f"last {days} days"
+        lines = [f"📊 <b>Site traffic — {period_label}</b>",
+                 f"👥 {total_users} users · 👁️ {total_views} page views (top 25 pages)\n"]
+
+        lines.append("<b>Top pages:</b>")
+        for r in other_rows:
+            path = r["dimensionValues"][0]["value"]
+            views = r["metricValues"][0]["value"]
+            lines.append(f"  • {path} — {views} views")
+
+        if eklavya_rows:
+            eklavya_views = sum(int(r["metricValues"][0]["value"]) for r in eklavya_rows)
+            lines.append(f"\n🏹 <b>Eklavya pages: {eklavya_views} total views</b>")
+            for r in eklavya_rows[:10]:
+                path = r["dimensionValues"][0]["value"]
+                views = r["metricValues"][0]["value"]
+                lines.append(f"  • {path} — {views} views")
+        else:
+            lines.append("\n🏹 <b>Eklavya pages:</b> no recorded views in this window.")
+
+        msg = "\n".join(lines)
+
+    try:
+        send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Fetched data but Telegram send failed: {str(e)[:200]}"}), 502
+
+    return jsonify({"ok": True, "rows_returned": len(rows)})
+
+
+
 
 @app.route('/', methods=['GET'])
 def health():
@@ -3904,7 +4018,7 @@ def health():
         "/api/daily-digest", "/api/news-digest-i18n", "/api/daily-quiz",
         "/api/telegram-webhook", "/api/daily-social-card",
         "/api/daily-sc-digest", "/api/sc-digest-data",
-        "/api/daily-scam-ed", "/api/youtube-stats",
+        "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
     ]})
 
 
