@@ -928,10 +928,20 @@ def llb5_build_topics():
 
         info = LLB5_SUBJECTS[subject]
         prompt = build_llb5_topic_index_prompt(info["name"], info["units"])
-        parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=4000)
-        topics = parsed.get("topics", [])
+        try:
+            # 45 structured objects in one response needs real headroom —
+            # too low a limit here truncates the JSON mid-array and the
+            # whole call fails, which is why nothing was showing up.
+            parsed = call_gemini_structured(gemini_key, prompt, LLB5_TOPIC_INDEX_SCHEMA, max_tokens=8000)
+        except urllib.error.HTTPError as he:
+            body = he.read().decode()
+            return jsonify({"ok": False, "error": f"Gemini error {he.code}: {body[:300]}"}), 502
+        except Exception as ge:
+            return jsonify({"ok": False, "error": f"Generation/parse error: {str(ge)[:300]}"}), 502
+
+        topics = parsed.get("topics", []) if parsed else []
         if len(topics) < 10:
-            return jsonify({"ok": False, "error": "Generation produced too few topics, not saving."}), 502
+            return jsonify({"ok": False, "error": f"Generation produced only {len(topics)} topics, not saving. Try again."}), 502
 
         topics.sort(key=lambda t: t.get("day", 0))
         data = {
@@ -948,11 +958,80 @@ def llb5_build_topics():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
+    # Shared logic for a single subject's "today" lecture — used by both
+    # the per-subject endpoint (handy for manual testing/backfill) and the
+    # single combined endpoint that refreshes all 5 subjects in one call.
+    # Never overwrites an existing day's lecture — each day's content is
+    # permanent once generated; only a day that hasn't been written yet
+    # gets filled in.
+    topics_data, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
+    if not topics_data or not topics_data.get("topics"):
+        return {"ok": False, "subject": subject, "error": "No topic index yet — run /api/llb5-build-topics first."}
+
+    start = datetime.fromisoformat(topics_data.get("start_date", LLB5_START_DATE)).date()
+    today = datetime.now(timezone.utc).date()
+    day_num = (today - start).days + 1
+
+    if day_num < 1:
+        return {"ok": True, "subject": subject, "skipped": True, "reason": f"Plan hasn't started yet (starts {start})."}
+    if day_num > len(topics_data["topics"]):
+        return {"ok": True, "subject": subject, "skipped": True, "reason": "Plan already completed."}
+
+    entry_meta = next((t for t in topics_data["topics"] if t.get("day") == day_num), None)
+    if not entry_meta:
+        return {"ok": False, "subject": subject, "error": f"No topic defined for day {day_num}."}
+
+    lfname = llb5_lectures_file(subject)
+    try:
+        lectures, lsha = github_get(lfname, site_token, timeout=8)
+        if lectures is None:
+            lectures = {"lectures": {}}
+    except Exception:
+        lectures, lsha = {"lectures": {}}, None
+
+    if str(day_num) in lectures.get("lectures", {}):
+        return {"ok": True, "subject": subject, "skipped": True, "reason": f"Day {day_num} already generated."}
+
+    prompt = build_llb5_lecture_prompt(LLB5_SUBJECTS[subject]["name"], entry_meta["unit"], entry_meta["topic"])
+    try:
+        parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=6000)
+    except Exception as ge:
+        return {"ok": False, "subject": subject, "error": f"Generation error: {str(ge)[:300]}"}
+
+    if not parsed or not parsed.get("concept_explanation"):
+        return {"ok": False, "subject": subject, "error": "Generation returned no content."}
+
+    lecture_entry = {
+        "day": day_num,
+        "date": today.isoformat(),
+        "unit": entry_meta["unit"],
+        "topic": entry_meta["topic"],
+        "lecture_title": parsed["lecture_title"],
+        "concept_explanation": parsed["concept_explanation"],
+        "key_provisions": parsed.get("key_provisions", []),
+        "case_laws": parsed.get("case_laws", []),
+        "illustration": parsed.get("illustration", ""),
+        "exam_angle": parsed.get("exam_angle", ""),
+        "quick_recap": parsed.get("quick_recap", []),
+        "importance_stars": parsed.get("importance_stars", 3),
+        "importance_reason": parsed.get("importance_reason", ""),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    lectures.setdefault("lectures", {})[str(day_num)] = lecture_entry
+    try:
+        github_put(lfname, site_token, lectures, lsha, f"LLB5 {subject} day {day_num}: {entry_meta['topic'][:50]}", timeout=20)
+    except Exception as we:
+        return {"ok": False, "subject": subject, "error": f"Save error: {str(we)[:300]}"}
+
+    return {"ok": True, "subject": subject, "day": day_num, "topic": entry_meta["topic"]}
+
+
 @app.route('/api/llb5-daily-lecture', methods=['GET'])
 def llb5_daily_lecture():
-    # Cron target — one call per subject per day. Generates ONLY the
-    # lecture for today's position in that subject's 45-day plan, and
-    # only once (checked against the cache before generating).
+    # Single-subject version — useful for manual testing/backfilling one
+    # subject. For the actual daily cron, use /api/llb5-daily-lecture-all
+    # instead, which refreshes all 5 subjects in one call/one cron job.
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not site_token or not gemini_key:
@@ -963,63 +1042,37 @@ def llb5_daily_lecture():
         return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
 
     try:
-        topics_data, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
-        if not topics_data or not topics_data.get("topics"):
-            return jsonify({"ok": False, "error": "No topic index yet — call /api/llb5-build-topics first."}), 404
-
-        start = datetime.fromisoformat(topics_data.get("start_date", LLB5_START_DATE)).date()
-        today = datetime.now(timezone.utc).date()
-        day_num = (today - start).days + 1
-
-        if day_num < 1:
-            return jsonify({"ok": True, "skipped": True, "reason": f"Plan hasn't started yet (starts {start})."})
-        if day_num > len(topics_data["topics"]):
-            return jsonify({"ok": True, "skipped": True, "reason": "Plan already completed for this subject."})
-
-        entry_meta = next((t for t in topics_data["topics"] if t.get("day") == day_num), None)
-        if not entry_meta:
-            return jsonify({"ok": False, "error": f"No topic defined for day {day_num}."}), 404
-
-        lfname = llb5_lectures_file(subject)
-        try:
-            lectures, lsha = github_get(lfname, site_token, timeout=8)
-            if lectures is None:
-                lectures = {"lectures": {}}
-        except Exception:
-            lectures, lsha = {"lectures": {}}, None
-
-        if str(day_num) in lectures.get("lectures", {}):
-            return jsonify({"ok": True, "skipped": True, "reason": f"Day {day_num} already generated."})
-
-        prompt = build_llb5_lecture_prompt(
-            LLB5_SUBJECTS[subject]["name"], entry_meta["unit"], entry_meta["topic"]
-        )
-        parsed = call_gemini_structured(gemini_key, prompt, LLB5_LECTURE_SCHEMA, max_tokens=4000)
-        if not parsed or not parsed.get("concept_explanation"):
-            return jsonify({"ok": False, "error": "Generation failed."}), 502
-
-        lecture_entry = {
-            "day": day_num,
-            "date": today.isoformat(),
-            "unit": entry_meta["unit"],
-            "topic": entry_meta["topic"],
-            "lecture_title": parsed["lecture_title"],
-            "concept_explanation": parsed["concept_explanation"],
-            "key_provisions": parsed.get("key_provisions", []),
-            "case_laws": parsed.get("case_laws", []),
-            "illustration": parsed.get("illustration", ""),
-            "exam_angle": parsed.get("exam_angle", ""),
-            "quick_recap": parsed.get("quick_recap", []),
-            "importance_stars": parsed.get("importance_stars", 3),
-            "importance_reason": parsed.get("importance_reason", ""),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        lectures.setdefault("lectures", {})[str(day_num)] = lecture_entry
-        github_put(lfname, site_token, lectures, lsha, f"LLB5 {subject} day {day_num}: {entry_meta['topic'][:50]}", timeout=20)
-
-        return jsonify({"ok": True, "subject": subject, "day": day_num, "topic": entry_meta["topic"]})
+        result = _llb5_generate_one_subject_lecture(subject, site_token, gemini_key)
+        return jsonify(result), (200 if result.get("ok") else 502)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/api/llb5-daily-lecture-all', methods=['GET'])
+def llb5_daily_lecture_all():
+    # THE cron target — one job, once a day, refreshes all 5 subjects.
+    # Each subject is independent: a failure or skip on one never blocks
+    # the others, and a day that's already generated is never touched
+    # again (so nothing gets "washed out" — today's content, once
+    # written, stays exactly as-is; only a not-yet-written day fills in).
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    results = []
+    for subject in LLB5_SUBJECTS.keys():
+        try:
+            results.append(_llb5_generate_one_subject_lecture(subject, site_token, gemini_key))
+        except Exception as e:
+            results.append({"ok": False, "subject": subject, "error": str(e)})
+
+    return jsonify({
+        "ok": all(r.get("ok") for r in results),
+        "results": results,
+    })
+
+
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 
 
