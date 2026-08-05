@@ -748,7 +748,7 @@ GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 # never pre-generated in bulk, so nothing leaks ahead of schedule.
 # ============================================================
 
-LLB5_START_DATE = "2026-08-06"  # day 1 of the 45-day plan, IST calendar dates
+LLB5_START_DATE = "2026-08-05"  # day 1 of the 45-day plan, IST calendar dates
 LLB5_DAYS = 45
 
 LLB5_SUBJECTS = {
