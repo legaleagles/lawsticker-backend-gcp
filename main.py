@@ -36,6 +36,7 @@ def today_ist():
     # that should run, or mislabel content with yesterday's date.
     return datetime.now(IST).date()
 from PIL import Image, ImageDraw, ImageFont
+from pypdf import PdfReader
 
 app = Flask(__name__)
 CORS(app, origins=["https://lawsticker-ai.com"])
@@ -1643,6 +1644,29 @@ PYQ_AUTO_SCHEMA = {
 }
 
 
+def try_extract_pdf_text(pdf_bytes):
+    # Free, local, zero-AI-cost text extraction — many PDFs already have a
+    # real text layer (typed originals, or scans that were already OCR'd
+    # by whatever device produced them), even if they visually look like
+    # a scan. If we can pull real text out this way, we send Gemini plain
+    # text instead of the whole PDF as an image — cheaper and more
+    # reliable. Returns the extracted text if it looks substantial, else
+    # None (meaning: no usable text layer, this is a true scan/photo and
+    # needs the vision fallback).
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages_text = [page.extract_text() or "" for page in reader.pages]
+        full_text = "\n\n".join(pages_text).strip()
+        # Heuristic: a real text layer for an exam paper should average at
+        # least ~120 characters per page; scanned PDFs with no text layer
+        # return empty or near-empty strings per page.
+        if len(reader.pages) > 0 and len(full_text) >= 120 * len(reader.pages):
+            return full_text
+        return None
+    except Exception:
+        return None  # any parsing failure just falls back to vision mode
+
+
 def build_pyq_auto_prompt():
     subject_list = "\n".join(f"- {slug}: {info['name']}" for slug, info in LLB5_SUBJECTS.items())
     return f"""This PDF contains one or more LL.B. exam question papers, in ANY arrangement — it might be a single paper for one subject, one subject's papers across several years, several different subjects' papers from the same year, or a completely mixed bulk scan. Some pages may be clean typed text, others may be rough photographed/scanned copies — read carefully either way, including handwriting or faint print.
@@ -1710,10 +1734,28 @@ def pyq_extract():
         return jsonify({"ok": False, "error": "pdf_base64 is required."}), 400
 
     prompt = build_pyq_auto_prompt()
-    parts = [
-        {"text": prompt},
-        {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
-    ]
+
+    # Try free, local text extraction first — only fall back to sending
+    # Gemini the whole PDF as an image (vision mode, more tokens) if this
+    # PDF genuinely has no usable text layer, i.e. it's a real scan/photo.
+    extraction_mode = "vision"
+    try:
+        pdf_bytes = base64.b64decode(pdf_base64)
+        extracted_text = try_extract_pdf_text(pdf_bytes)
+    except Exception:
+        extracted_text = None
+
+    if extracted_text:
+        extraction_mode = "text"
+        parts = [
+            {"text": prompt + "\n\nHere is the extracted text of the PDF (this is a born-digital document, not a scan):\n\n" + extracted_text}
+        ]
+    else:
+        parts = [
+            {"text": prompt},
+            {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
+        ]
+
     payload = json.dumps({
         "contents": [{"parts": parts}],
         "generationConfig": {
@@ -1789,6 +1831,7 @@ def pyq_extract():
         "papers_found": len(papers),
         "auto_sorted": auto_sorted,
         "needs_review_count": len(needs_review),
+        "extraction_mode": extraction_mode,
     })
 
 
