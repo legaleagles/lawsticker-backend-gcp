@@ -1606,66 +1606,71 @@ def pyq_file(subject):
     return f"llb-pyq-{subject}.json"
 
 
-PYQ_EXTRACTION_SCHEMA = {
+PYQ_UNASSIGNED_FILE = "llb-pyq-unassigned.json"
+
+PYQ_AUTO_SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "questions": {
+        "papers": {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "part": {"type": "STRING"},
-                    "question_number": {"type": "STRING"},
-                    "marks": {"type": "STRING"},
-                    "question_text": {"type": "STRING"},
-                    "sub_parts": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "detected_title": {"type": "STRING"},
+                    "matched_subject_slug": {"type": "STRING"},
+                    "confidence": {"type": "STRING"},
+                    "year": {"type": "STRING"},
+                    "questions": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "part": {"type": "STRING"},
+                                "question_number": {"type": "STRING"},
+                                "marks": {"type": "STRING"},
+                                "question_text": {"type": "STRING"},
+                                "sub_parts": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            },
+                            "required": ["part", "question_number", "question_text"]
+                        }
+                    }
                 },
-                "required": ["part", "question_number", "question_text"]
+                "required": ["detected_title", "matched_subject_slug", "confidence", "year", "questions"]
             }
         }
     },
-    "required": ["questions"]
+    "required": ["papers"]
 }
 
 
-def build_pyq_extraction_prompt(subject_name):
-    return f"""This is a scanned or photographed past exam question paper for the LL.B. paper "{subject_name}". It may be a clean text PDF or a rough scan — read it carefully either way, including handwriting or faint print if present.
+def build_pyq_auto_prompt():
+    subject_list = "\n".join(f"- {slug}: {info['name']}" for slug, info in LLB5_SUBJECTS.items())
+    return f"""This PDF contains one or more LL.B. exam question papers, in ANY arrangement — it might be a single paper for one subject, one subject's papers across several years, several different subjects' papers from the same year, or a completely mixed bulk scan. Some pages may be clean typed text, others may be rough photographed/scanned copies — read carefully either way, including handwriting or faint print.
 
-Extract EVERY individual question exactly as written. Do not summarize, paraphrase, or skip anything — this needs to be a faithful, complete transcription for building a searchable archive, not a summary.
+STEP 1 — Find every distinct paper in this document. A "paper" is one complete question set for one subject for one sitting/year. If the document contains 5 subjects' worth of papers, that's 5 separate papers even if they're all stapled into one PDF.
 
-For each question, give:
-part — the section/part it's in, e.g. "Part A", "Section I", "Unit 3" — use whatever labeling the paper itself uses; if the paper isn't divided into parts, use "General"
-question_number — exactly as printed (e.g. "1", "Q3", "5(a)")
-marks — the marks allotted if printed on the paper (e.g. "10"), else leave empty string
-question_text — the full question text, verbatim
-sub_parts — if the question has lettered sub-parts (a), (b), (c) that are meant to be answered together, list each sub-part's text here; otherwise leave as an empty array
+STEP 2 — For each paper you find, identify:
+detected_title — however the paper identifies itself on the page (subject name, code, header text) — write exactly what you see, even if messy
+matched_subject_slug — match it to the closest one of these known LL.B. subjects by slug. Use your judgement on subject-matter fit even if the paper's title wording doesn't exactly match the name below. If you genuinely cannot match it to any of these with reasonable confidence, use the literal string "unmatched" — do NOT force a bad match.
 
-If any part of the scan is illegible, write "[illegible]" in that spot rather than guessing or inventing text — accuracy matters more than completeness here."""
+KNOWN SUBJECTS:
+{subject_list}
+
+confidence — "high" (certain of both subject and year), "medium" (fairly sure but not certain), or "low" (a real guess)
+year — the 4-digit exam year if stated anywhere on the paper (header, footer, watermark); if genuinely not stated anywhere, use the literal string "unknown"
+
+STEP 3 — For each paper, extract EVERY individual question exactly as written — do not summarize or skip anything. For each question give:
+part — the section/part label used on that paper (e.g. "Part A", "Section I"); use "General" if the paper has no parts
+question_number — exactly as printed
+marks — marks allotted if printed, else empty string
+question_text — the full question, verbatim
+sub_parts — lettered sub-parts (a),(b),(c) if any, else empty array
+
+If any text is illegible, write "[illegible]" rather than guessing. Accuracy matters far more than completeness."""
 
 
-@app.route('/api/pyq-extract', methods=['POST'])
-def pyq_extract():
-    site_token = os.environ.get("SITE_REPO_TOKEN")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not site_token or not gemini_key:
-        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
-
-    body = request.get_json(force=True, silent=True) or {}
-    subject = body.get("subject")
-    year = body.get("year")
-    pdf_base64 = body.get("pdf_base64")
-    force = body.get("force", False)
-
-    if subject not in LLB5_SUBJECTS:
-        return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
-    if not year:
-        return jsonify({"ok": False, "error": "year is required."}), 400
-    if not pdf_base64:
-        return jsonify({"ok": False, "error": "pdf_base64 is required."}), 400
-
-    year = str(year)
+def _pyq_save_matched(subject, year, questions, site_token):
     fname = pyq_file(subject)
-
     try:
         data, sha = github_get(fname, site_token, timeout=8)
         if data is None:
@@ -1673,42 +1678,8 @@ def pyq_extract():
     except Exception:
         data, sha = {"subject": subject, "papers": {}}, None
 
-    if year in data.get("papers", {}) and not force:
-        return jsonify({"ok": True, "skipped": True, "reason": f"Year {year} already uploaded for this subject. Pass force:true to replace it."})
-
-    prompt = build_pyq_extraction_prompt(LLB5_SUBJECTS[subject]["name"])
-    parts = [
-        {"text": prompt},
-        {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
-    ]
-    payload = json.dumps({
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "maxOutputTokens": 8000,
-            "responseMimeType": "application/json",
-            "responseSchema": PYQ_EXTRACTION_SCHEMA,
-        },
-    }).encode()
-    req = urllib.request.Request(
-        f"{GEMINI_URL}?key={gemini_key}",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read().decode())
-        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(raw_text)
-    except urllib.error.HTTPError as he:
-        err_body = he.read().decode()
-        return jsonify({"ok": False, "error": f"Gemini error {he.code}: {err_body[:400]}"}), 502
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Extraction/parse error: {str(e)[:300]}"}), 502
-
-    questions = parsed.get("questions", [])
-    if not questions:
-        return jsonify({"ok": False, "error": "No questions were extracted — check the PDF is readable, or try a clearer scan."}), 502
+    if year in data.get("papers", {}):
+        return {"ok": True, "skipped": True, "reason": f"{subject} {year} already exists."}
 
     data.setdefault("papers", {})[year] = {
         "year": year,
@@ -1718,14 +1689,149 @@ def pyq_extract():
     }
     data["subject"] = subject
     data["subject_name"] = LLB5_SUBJECTS[subject]["name"]
+    github_put(fname, site_token, data, sha, f"PYQ auto-sorted: {subject} {year} ({len(questions)} q)", timeout=20)
+    return {"ok": True, "subject": subject, "year": year, "question_count": len(questions)}
+
+
+@app.route('/api/pyq-extract', methods=['POST'])
+def pyq_extract():
+    # One PDF in, however many papers it turns out to contain. Confident
+    # subject+year matches save straight into that subject's archive.
+    # Anything uncertain goes into a review queue instead of guessing
+    # wrong silently — see /api/pyq-assign to confirm those manually.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    pdf_base64 = body.get("pdf_base64")
+    if not pdf_base64:
+        return jsonify({"ok": False, "error": "pdf_base64 is required."}), 400
+
+    prompt = build_pyq_auto_prompt()
+    parts = [
+        {"text": prompt},
+        {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
+    ]
+    payload = json.dumps({
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "maxOutputTokens": 20000,
+            "responseMimeType": "application/json",
+            "responseSchema": PYQ_AUTO_SCHEMA,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={gemini_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=170) as resp:
+            result = json.loads(resp.read().decode())
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(raw_text)
+    except urllib.error.HTTPError as he:
+        err_body = he.read().decode()
+        return jsonify({"ok": False, "error": f"Gemini error {he.code}: {err_body[:400]}"}), 502
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Extraction/parse error: {str(e)[:300]}"}), 502
+
+    papers = parsed.get("papers", [])
+    if not papers:
+        return jsonify({"ok": False, "error": "No papers were detected — check the PDF is readable, or try a clearer scan."}), 502
+
+    auto_sorted = []
+    needs_review = []
+
+    for p in papers:
+        slug = p.get("matched_subject_slug", "unmatched")
+        year = p.get("year", "unknown")
+        confidence = p.get("confidence", "low")
+        questions = p.get("questions", [])
+
+        if slug in LLB5_SUBJECTS and year != "unknown" and confidence in ("high", "medium") and questions:
+            try:
+                result = _pyq_save_matched(slug, year, questions, site_token)
+                auto_sorted.append({**result, "detected_title": p.get("detected_title", "")})
+                continue
+            except Exception as e:
+                pass  # falls through to review queue if the save failed
+
+        needs_review.append({
+            "id": f"unassigned-{int(datetime.now(timezone.utc).timestamp()*1000)}-{len(needs_review)}",
+            "detected_title": p.get("detected_title", ""),
+            "guessed_subject_slug": slug if slug in LLB5_SUBJECTS else "",
+            "guessed_year": year if year != "unknown" else "",
+            "confidence": confidence,
+            "question_count": len(questions),
+            "questions": questions,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    if needs_review:
+        try:
+            queue, qsha = github_get(PYQ_UNASSIGNED_FILE, site_token, timeout=8)
+            if queue is None:
+                queue = {"items": []}
+        except Exception:
+            queue, qsha = {"items": []}, None
+        queue.setdefault("items", []).extend(needs_review)
+        try:
+            github_put(PYQ_UNASSIGNED_FILE, site_token, queue, qsha, f"PYQ: {len(needs_review)} papers need review", timeout=20)
+        except Exception as we:
+            return jsonify({"ok": False, "error": f"Auto-sorted {len(auto_sorted)} papers but saving the review queue failed: {str(we)[:300]}"}), 502
+
+    return jsonify({
+        "ok": True,
+        "papers_found": len(papers),
+        "auto_sorted": auto_sorted,
+        "needs_review_count": len(needs_review),
+    })
+
+
+@app.route('/api/pyq-assign', methods=['POST'])
+def pyq_assign():
+    # Confirms one item from the review queue into its real subject/year
+    # archive, then removes it from the queue.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    item_id = body.get("id")
+    subject = body.get("subject")
+    year = body.get("year")
+
+    if subject not in LLB5_SUBJECTS:
+        return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
+    if not year:
+        return jsonify({"ok": False, "error": "year is required."}), 400
 
     try:
-        github_put(fname, site_token, data, sha, f"PYQ upload: {subject} {year} ({len(questions)} questions)", timeout=20)
+        queue, qsha = github_get(PYQ_UNASSIGNED_FILE, site_token, timeout=8)
+    except Exception:
+        return jsonify({"ok": False, "error": "Review queue not found."}), 404
+
+    items = (queue or {}).get("items", [])
+    match = next((it for it in items if it.get("id") == item_id), None)
+    if not match:
+        return jsonify({"ok": False, "error": "Item not found in review queue — may already be assigned."}), 404
+
+    try:
+        result = _pyq_save_matched(subject, str(year), match.get("questions", []), site_token)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Save failed: {str(e)[:300]}"}), 502
+
+    queue["items"] = [it for it in items if it.get("id") != item_id]
+    try:
+        github_put(PYQ_UNASSIGNED_FILE, site_token, queue, qsha, f"PYQ: assigned {item_id} to {subject} {year}", timeout=20)
     except Exception as we:
-        return jsonify({"ok": False, "error": f"Extracted {len(questions)} questions but save failed: {str(we)[:300]}"}), 502
+        return jsonify({"ok": False, "error": f"Saved to {subject} but removing from queue failed: {str(we)[:300]}"}), 502
 
-    return jsonify({"ok": True, "subject": subject, "year": year, "question_count": len(questions)})
-
+    return jsonify({"ok": True, "result": result})
 
 
 
