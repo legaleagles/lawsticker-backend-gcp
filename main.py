@@ -12,6 +12,7 @@ Required environment variables (set these in Cloud Run's
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
+import random
 import os
 import re
 import base64
@@ -1514,6 +1515,14 @@ def llb5_daily_lecture_all():
             return jsonify({"ok": False, "error": f"No subjects found for semester {semester}."}), 400
     else:
         subjects = list(LLB5_SUBJECTS.keys())
+
+    # Fairness fix: the time budget below can cut off before reaching every
+    # subject on a slow day. Without shuffling, the same subjects at the
+    # END of this list (e.g. adr, ethics in Semester 5) would be starved
+    # EVERY single day, never getting a turn — not random bad luck, a
+    # structural bug. Shuffling means any subject that got cut off today
+    # has a real chance of being processed first tomorrow instead.
+    random.shuffle(subjects)
 
     # Time-budgeted, not subject-count-limited: cron-job.org's own client
     # gives up waiting well before a full batch of subjects can finish
