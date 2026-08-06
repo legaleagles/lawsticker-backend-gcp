@@ -1524,19 +1524,20 @@ def llb5_daily_lecture_all():
     # has a real chance of being processed first tomorrow instead.
     random.shuffle(subjects)
 
-    # Time-budgeted, not subject-count-limited: cron-job.org's own client
-    # gives up waiting well before a full batch of subjects can finish
-    # generating (each one is a real Gemini call, often 10-20+ seconds).
-    # Stop starting new subjects once the budget is used up and return
-    # immediately with whatever's done — anything left over is picked up
-    # automatically on the NEXT run of this same job, via the self-healing
-    # "oldest missing day" logic already in _llb5_generate_one_subject_lecture.
-    # Default budget is deliberately well under typical free-tier cron
-    # client timeouts (usually ~30s). Override with ?budget_seconds=N.
+    # Time-budgeted, but generously — this is a background batch job, not
+    # a user-facing request. Cloud Run keeps working even if the calling
+    # client (cron-job.org) stops waiting or shows its own timeout on its
+    # dashboard — that's cosmetic, not a correctness problem, and the
+    # Telegram notification already reports what actually happened
+    # regardless of what cron-job.org's UI shows. A short budget here was
+    # a real mistake: it routinely cut off before finishing every subject
+    # in a semester, silently starving whichever ones didn't fit in time —
+    # not "daily automation," just "maybe, some days." Override with
+    # ?budget_seconds=N if you ever need to tune this further.
     try:
-        budget_seconds = float(request.args.get("budget_seconds", 20))
+        budget_seconds = float(request.args.get("budget_seconds", 240))
     except ValueError:
-        budget_seconds = 20
+        budget_seconds = 240
 
     start_time = time.time()
     results = []
