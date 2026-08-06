@@ -1607,7 +1607,16 @@ def pyq_file(subject):
     return f"llb-pyq-{subject}.json"
 
 
-PYQ_UNASSIGNED_FILE = "llb-pyq-unassigned.json"
+def pyq_analysis_file(subject):
+    return f"llb-pyq-analysis-{subject}.json"
+
+
+def check_pyq_password(provided):
+    real_password = os.environ.get("PYQ_PASSWORD")
+    if not real_password:
+        return False
+    return provided == real_password
+
 
 PYQ_AUTO_SCHEMA = {
     "type": "OBJECT",
@@ -1693,7 +1702,7 @@ sub_parts — lettered sub-parts (a),(b),(c) if any, else empty array
 If any text is illegible, write "[illegible]" rather than guessing. Accuracy matters far more than completeness."""
 
 
-def _pyq_save_matched(subject, year, questions, site_token):
+def _pyq_save_paper(subject, year, questions, site_token, overwrite=False):
     fname = pyq_file(subject)
     try:
         data, sha = github_get(fname, site_token, timeout=8)
@@ -1702,42 +1711,43 @@ def _pyq_save_matched(subject, year, questions, site_token):
     except Exception:
         data, sha = {"subject": subject, "papers": {}}, None
 
-    if year in data.get("papers", {}):
-        return {"ok": True, "skipped": True, "reason": f"{subject} {year} already exists."}
+    if year in data.get("papers", {}) and not overwrite:
+        return {"ok": True, "skipped": True, "reason": f"{subject} {year} already exists. Pass overwrite:true to replace it."}
 
     data.setdefault("papers", {})[year] = {
         "year": year,
         "question_count": len(questions),
         "questions": questions,
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "confirmed_at": datetime.now(timezone.utc).isoformat(),
     }
     data["subject"] = subject
     data["subject_name"] = LLB5_SUBJECTS[subject]["name"]
-    github_put(fname, site_token, data, sha, f"PYQ auto-sorted: {subject} {year} ({len(questions)} q)", timeout=20)
+    github_put(fname, site_token, data, sha, f"PYQ confirmed: {subject} {year} ({len(questions)} q)", timeout=20)
     return {"ok": True, "subject": subject, "year": year, "question_count": len(questions)}
 
 
 @app.route('/api/pyq-extract', methods=['POST'])
 def pyq_extract():
-    # One PDF in, however many papers it turns out to contain. Confident
-    # subject+year matches save straight into that subject's archive.
-    # Anything uncertain goes into a review queue instead of guessing
-    # wrong silently — see /api/pyq-assign to confirm those manually.
-    site_token = os.environ.get("SITE_REPO_TOKEN")
+    # PREVIEW ONLY — nothing is saved here. Finds however many distinct
+    # papers exist in the uploaded PDF and returns Gemini's best guess at
+    # subject/year for each, for the caller to review. Saving only ever
+    # happens via /api/pyq-confirm, one paper at a time, after a human
+    # has actually looked at it. Password-gated: this step costs real AI
+    # usage, so it should never be reachable by anyone but you.
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not site_token or not gemini_key:
+    if not gemini_key:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
     body = request.get_json(force=True, silent=True) or {}
+    if not check_pyq_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect or unset PYQ password."}), 401
+
     pdf_base64 = body.get("pdf_base64")
     if not pdf_base64:
         return jsonify({"ok": False, "error": "pdf_base64 is required."}), 400
 
     prompt = build_pyq_auto_prompt()
 
-    # Try free, local text extraction first — only fall back to sending
-    # Gemini the whole PDF as an image (vision mode, more tokens) if this
-    # PDF genuinely has no usable text layer, i.e. it's a real scan/photo.
     extraction_mode = "vision"
     try:
         pdf_bytes = base64.b64decode(pdf_base64)
@@ -1785,96 +1795,179 @@ def pyq_extract():
     if not papers:
         return jsonify({"ok": False, "error": "No papers were detected — check the PDF is readable, or try a clearer scan."}), 502
 
-    auto_sorted = []
-    needs_review = []
-
-    for p in papers:
-        slug = p.get("matched_subject_slug", "unmatched")
-        year = p.get("year", "unknown")
-        confidence = p.get("confidence", "low")
-        questions = p.get("questions", [])
-
-        if slug in LLB5_SUBJECTS and year != "unknown" and confidence in ("high", "medium") and questions:
-            try:
-                result = _pyq_save_matched(slug, year, questions, site_token)
-                auto_sorted.append({**result, "detected_title": p.get("detected_title", "")})
-                continue
-            except Exception as e:
-                pass  # falls through to review queue if the save failed
-
-        needs_review.append({
-            "id": f"unassigned-{int(datetime.now(timezone.utc).timestamp()*1000)}-{len(needs_review)}",
-            "detected_title": p.get("detected_title", ""),
-            "guessed_subject_slug": slug if slug in LLB5_SUBJECTS else "",
-            "guessed_year": year if year != "unknown" else "",
-            "confidence": confidence,
-            "question_count": len(questions),
-            "questions": questions,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        })
-
-    if needs_review:
-        try:
-            queue, qsha = github_get(PYQ_UNASSIGNED_FILE, site_token, timeout=8)
-            if queue is None:
-                queue = {"items": []}
-        except Exception:
-            queue, qsha = {"items": []}, None
-        queue.setdefault("items", []).extend(needs_review)
-        try:
-            github_put(PYQ_UNASSIGNED_FILE, site_token, queue, qsha, f"PYQ: {len(needs_review)} papers need review", timeout=20)
-        except Exception as we:
-            return jsonify({"ok": False, "error": f"Auto-sorted {len(auto_sorted)} papers but saving the review queue failed: {str(we)[:300]}"}), 502
+    # Attach a temporary preview id to each paper so the frontend can
+    # track them individually (confirm one, retry another) without any
+    # of this having been saved anywhere yet.
+    for i, p in enumerate(papers):
+        p["preview_id"] = f"preview-{int(datetime.now(timezone.utc).timestamp()*1000)}-{i}"
+        if p.get("matched_subject_slug") not in LLB5_SUBJECTS:
+            p["matched_subject_slug"] = ""
+        if p.get("year") == "unknown":
+            p["year"] = ""
 
     return jsonify({
         "ok": True,
         "papers_found": len(papers),
-        "auto_sorted": auto_sorted,
-        "needs_review_count": len(needs_review),
+        "papers": papers,
         "extraction_mode": extraction_mode,
     })
 
 
-@app.route('/api/pyq-assign', methods=['POST'])
-def pyq_assign():
-    # Confirms one item from the review queue into its real subject/year
-    # archive, then removes it from the queue.
+@app.route('/api/pyq-confirm', methods=['POST'])
+def pyq_confirm():
+    # Saves ONE reviewed paper permanently. Called once per paper after
+    # the human reviewing the preview is satisfied with the subject/year
+    # (corrected or not) and the extracted questions.
     site_token = os.environ.get("SITE_REPO_TOKEN")
     if not site_token:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
     body = request.get_json(force=True, silent=True) or {}
-    item_id = body.get("id")
+    if not check_pyq_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect or unset PYQ password."}), 401
+
     subject = body.get("subject")
     year = body.get("year")
+    questions = body.get("questions")
+    overwrite = bool(body.get("overwrite", False))
 
     if subject not in LLB5_SUBJECTS:
         return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
     if not year:
         return jsonify({"ok": False, "error": "year is required."}), 400
+    if not questions:
+        return jsonify({"ok": False, "error": "questions is required and cannot be empty."}), 400
 
     try:
-        queue, qsha = github_get(PYQ_UNASSIGNED_FILE, site_token, timeout=8)
-    except Exception:
-        return jsonify({"ok": False, "error": "Review queue not found."}), 404
-
-    items = (queue or {}).get("items", [])
-    match = next((it for it in items if it.get("id") == item_id), None)
-    if not match:
-        return jsonify({"ok": False, "error": "Item not found in review queue — may already be assigned."}), 404
-
-    try:
-        result = _pyq_save_matched(subject, str(year), match.get("questions", []), site_token)
+        result = _pyq_save_paper(subject, str(year), questions, site_token, overwrite=overwrite)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": f"Save failed: {str(e)[:300]}"}), 502
 
-    queue["items"] = [it for it in items if it.get("id") != item_id]
+
+PYQ_ANALYSIS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "summary": {"type": "STRING"},
+        "topics": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "topic": {"type": "STRING"},
+                    "times_asked": {"type": "INTEGER"},
+                    "years_asked": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "typical_part": {"type": "STRING"},
+                    "marks_weighted_importance": {"type": "STRING"},
+                },
+                "required": ["topic", "times_asked", "years_asked", "typical_part", "marks_weighted_importance"]
+            }
+        }
+    },
+    "required": ["summary", "topics"]
+}
+
+
+def build_pyq_analysis_prompt(subject_name, topic_list, all_questions):
+    topics_text = "\n".join(f"- {t}" for t in topic_list)
+    questions_text = "\n\n".join(
+        f"[{q['_year']}, {q.get('part','')}, {q.get('marks','') or '? '} marks] {q.get('question_text','')}"
+        for q in all_questions
+    )
+    return f"""You are analyzing {len(all_questions)} real exam questions collected across multiple years for the LL.B. paper "{subject_name}", to identify genuine historical patterns — NOT to predict a future paper.
+
+This subject's syllabus is organized into these known topics:
+{topics_text}
+
+Here are all the collected questions, each tagged with the year, section/part, and marks it was worth:
+{questions_text}
+
+For each syllabus topic that has actually been asked about (skip topics with zero matches), report:
+topic — the exact topic name from the list above
+times_asked — how many of the collected questions map to this topic
+years_asked — which years (from the tags above) it appeared in
+typical_part — which part/section it tends to appear in (e.g. "Usually Part A, short answer" or "Mixed — both short and long answer")
+marks_weighted_importance — "High", "Medium", or "Low" — weight this by BOTH frequency AND marks value, not frequency alone; a topic asked 3 times as a 10-mark question matters more than one asked 5 times as a 2-mark question
+
+Also write a short (3-5 sentence) plain-language summary of the overall pattern — which topics dominate, whether the paper favors short-answer or essay questions, anything a student should notice.
+
+Stay strictly descriptive and backward-looking — report what HAS happened in these papers. Do not suggest what is likely to be asked next or imply any prediction."""
+
+
+@app.route('/api/pyq-analyze', methods=['POST'])
+def pyq_analyze():
+    # Deliberately NOT automatic and NOT re-run on every page load — this
+    # is a one-time (or "run again after adding more papers") action the
+    # user triggers manually, password-gated, since it's the more
+    # expensive AI step. Never called by any cron.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_pyq_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect or unset PYQ password."}), 401
+
+    subject = body.get("subject")
+    if subject not in LLB5_SUBJECTS:
+        return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
+
     try:
-        github_put(PYQ_UNASSIGNED_FILE, site_token, queue, qsha, f"PYQ: assigned {item_id} to {subject} {year}", timeout=20)
+        pyq_data, _ = github_get(pyq_file(subject), site_token, timeout=8)
+    except Exception:
+        pyq_data = None
+    if not pyq_data or not pyq_data.get("papers"):
+        return jsonify({"ok": False, "error": "No confirmed papers for this subject yet — upload and confirm some first."}), 400
+
+    try:
+        topics_data, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
+    except Exception:
+        topics_data = None
+    if not topics_data or not topics_data.get("topics"):
+        return jsonify({"ok": False, "error": "This subject's Eklavya topic index doesn't exist yet — run /api/llb5-build-topics first."}), 400
+
+    topic_list = [t["topic"] for t in topics_data["topics"]]
+
+    all_questions = []
+    for year, paper in pyq_data["papers"].items():
+        for q in paper.get("questions", []):
+            q2 = dict(q)
+            q2["_year"] = year
+            all_questions.append(q2)
+
+    if len(all_questions) < 5:
+        return jsonify({"ok": False, "error": "Not enough confirmed questions yet for a meaningful analysis (need at least 5)."}), 400
+
+    prompt = build_pyq_analysis_prompt(LLB5_SUBJECTS[subject]["name"], topic_list, all_questions)
+    try:
+        parsed = call_gemini_structured(gemini_key, prompt, PYQ_ANALYSIS_SCHEMA, max_tokens=6000, timeout=60)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Analysis failed: {str(e)[:300]}"}), 502
+
+    result = {
+        "subject": subject,
+        "subject_name": LLB5_SUBJECTS[subject]["name"],
+        "summary": parsed.get("summary", ""),
+        "topics": sorted(parsed.get("topics", []), key=lambda t: t.get("times_asked", 0), reverse=True),
+        "based_on_years": sorted(pyq_data["papers"].keys()),
+        "based_on_question_count": len(all_questions),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        _, existing_sha = github_get(pyq_analysis_file(subject), site_token, timeout=8)
+    except Exception:
+        existing_sha = None
+
+    try:
+        github_put(pyq_analysis_file(subject), site_token, result, existing_sha, f"PYQ analysis: {subject}", timeout=20)
     except Exception as we:
-        return jsonify({"ok": False, "error": f"Saved to {subject} but removing from queue failed: {str(we)[:300]}"}), 502
+        return jsonify({"ok": False, "error": f"Analysis completed but saving failed: {str(we)[:300]}"}), 502
 
     return jsonify({"ok": True, "result": result})
+
+
 
 
 
