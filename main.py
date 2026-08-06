@@ -1612,10 +1612,9 @@ def pyq_analysis_file(subject):
 
 
 def check_pyq_password(provided):
-    real_password = os.environ.get("PYQ_PASSWORD")
-    if not real_password:
-        return False
-    return provided == real_password
+    # Deliberately reuses the same password as the scam moderator page —
+    # both are private, single-owner tools, no need for a second secret.
+    return check_moderator_password(provided)
 
 
 PYQ_AUTO_SCHEMA = {
