@@ -1351,13 +1351,18 @@ def llb5_build_all_topics():
     })
 
 
-def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, max_days_per_call=6):
+def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, max_days_per_call=6, target_day=None, overwrite=False):
     # Catches a subject FULLY up to today in one call, not just one day —
     # loops filling missing days until either it's current or a safety
     # cap is hit (protects a single subject from eating the whole time
     # budget if it somehow fell many days behind). This is what actually
     # eliminates the need to keep re-triggering by hand: one call now
     # does all the catching-up a subject needs, whatever the backlog.
+    #
+    # target_day: if set, generate ONLY that exact day number for this
+    # subject (surgical recovery for a known-missing day), ignoring the
+    # normal "oldest missing" scan. Still won't overwrite an existing day
+    # unless overwrite=True.
     topics_data, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
     if not topics_data or not topics_data.get("topics"):
         return {"ok": False, "subject": subject, "error": "No topic index yet — run /api/llb5-build-topics first."}
@@ -1371,7 +1376,7 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, max_days
     today = today_ist()
     today_day_num = (today - start).days + 1
 
-    if today_day_num < 1:
+    if today_day_num < 1 and target_day is None:
         return {"ok": True, "subject": subject, "skipped": True, "reason": f"Plan hasn't started yet (starts {start})."}
 
     lfname = llb5_lectures_file(subject)
@@ -1383,16 +1388,26 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, max_days
         lectures, lsha = {"lectures": {}}, None
 
     total_days = len(topics_data["topics"])
+
+    if target_day is not None:
+        if target_day < 1 or target_day > total_days:
+            return {"ok": False, "subject": subject, "error": f"day must be between 1 and {total_days}."}
+        if str(target_day) in lectures.get("lectures", {}) and not overwrite:
+            return {"ok": True, "subject": subject, "skipped": True, "reason": f"Day {target_day} already exists. Pass overwrite=1 to force-regenerate it."}
+
     days_filled = []
     days_failed = []
 
     while len(days_filled) < max_days_per_call:
         existing_days = lectures.get("lectures", {})
-        day_num = None
-        for candidate in range(1, min(today_day_num, total_days) + 1):
-            if str(candidate) not in existing_days:
-                day_num = candidate
-                break
+        if target_day is not None:
+            day_num = target_day if (str(target_day) not in existing_days or overwrite) else None
+        else:
+            day_num = None
+            for candidate in range(1, min(today_day_num, total_days) + 1):
+                if str(candidate) not in existing_days:
+                    day_num = candidate
+                    break
 
         if day_num is None:
             break  # fully caught up
@@ -1468,6 +1483,8 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, max_days
         except Exception:
             pass
         days_filled.append(day_num)
+        if target_day is not None:
+            break  # single-shot: never loop again in targeted-recovery mode, even with overwrite=True
 
     if not days_filled and not days_failed:
         if today_day_num > total_days:
@@ -1475,9 +1492,14 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, max_days
         return {"ok": True, "subject": subject, "skipped": True, "reason": f"Day {today_day_num} already generated."}
 
     if days_failed and not days_filled:
-        return {"ok": False, "subject": subject, "error": days_failed[0]["error"]}
+        return {"ok": False, "subject": subject, "failed_day": days_failed[0]["day"], "error": f"Day {days_failed[0]['day']}: {days_failed[0]['error']}"}
 
-    result = {"ok": True, "subject": subject, "days_filled": days_filled, "day": days_filled[-1] if days_filled else None}
+    result = {
+        "ok": True, "subject": subject,
+        "days_filled": days_filled,
+        "dates_filled": [(start + timedelta(days=d - 1)).isoformat() for d in days_filled],
+        "day": days_filled[-1] if days_filled else None,
+    }
     if days_failed:
         result["note"] = f"Filled {len(days_filled)} day(s), then hit an error on day {days_failed[0]['day']} — will retry that on the next run."
     remaining_check = today_day_num - (max(days_filled) if days_filled else 0)
@@ -1491,6 +1513,12 @@ def llb5_daily_lecture():
     # Single-subject version — useful for manual testing/backfilling one
     # subject. For the actual daily cron, use /api/llb5-daily-lecture-all
     # instead, which refreshes all 5 subjects in one call/one cron job.
+    #
+    # For SURGICAL recovery of a specific known-missing day, pass either:
+    #   ?day=12                 (exact day number for that subject)
+    #   ?date=2026-08-17         (exact calendar date — converted to a day
+    #                             number using that subject's own start date)
+    # Add &overwrite=1 to force-regenerate a day that already exists.
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not site_token or not gemini_key:
@@ -1500,8 +1528,29 @@ def llb5_daily_lecture():
     if subject not in LLB5_SUBJECTS:
         return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
 
+    overwrite = request.args.get("overwrite") == "1"
+    target_day = None
+
+    day_param = request.args.get("day")
+    date_param = request.args.get("date")
+    if day_param:
+        try:
+            target_day = int(day_param)
+        except ValueError:
+            return jsonify({"ok": False, "error": "day must be an integer."}), 400
+    elif date_param:
+        try:
+            topics_data, _ = github_get(llb5_topics_file(subject), site_token, timeout=8)
+            if not topics_data:
+                return jsonify({"ok": False, "error": "No topic index yet for this subject."}), 400
+            start = datetime.fromisoformat(topics_data.get("start_date", LLB5_START_DATE)).date()
+            target_date = datetime.fromisoformat(date_param).date()
+            target_day = (target_date - start).days + 1
+        except ValueError:
+            return jsonify({"ok": False, "error": "date must be in YYYY-MM-DD format."}), 400
+
     try:
-        result = _llb5_generate_one_subject_lecture(subject, site_token, gemini_key)
+        result = _llb5_generate_one_subject_lecture(subject, site_token, gemini_key, target_day=target_day, overwrite=overwrite)
         return jsonify(result), (200 if result.get("ok") else 502)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1590,16 +1639,19 @@ def llb5_daily_lecture_all():
 
         lines = [f"🏹 <b>Eklavya daily refresh — {sem_label}</b>"]
         if generated:
-            lines.append(f"✅ Generated ({len(generated)}): " + ", ".join(f"{r['subject']} (day {r.get('day','?')})" for r in generated))
+            for r in generated:
+                dates_str = ", ".join(r.get("dates_filled", []))
+                note_str = f" — ⚠️ {r['note']}" if r.get("note") else ""
+                lines.append(f"✅ {r['subject']}: day(s) {r['days_filled']} [{dates_str}]{note_str}")
         if skipped:
-            lines.append(f"⏭️ Skipped ({len(skipped)}): " + ", ".join(r["subject"] for r in skipped))
+            lines.append(f"⏭️ Already up to date ({len(skipped)}): " + ", ".join(r["subject"] for r in skipped))
         if failed:
             lines.append(f"❌ FAILED ({len(failed)}):")
             for r in failed:
                 lines.append(f"  • {r['subject']}: {r.get('error','unknown error')[:400]}")
         if untouched:
             lines.append(f"⏳ Not reached this run, will auto-catch-up next time ({len(untouched)}): " + ", ".join(untouched))
-        if not failed and not untouched:
+        if not failed and not untouched and all(not r.get("note") for r in generated):
             lines.append("All done, no issues.")
 
         msg = "\n".join(lines)
