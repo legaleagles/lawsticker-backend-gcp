@@ -23,6 +23,18 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def today_ist():
+    # This site and its users are in India — every "is it a new day yet"
+    # check (daily scam stories, marketing trick, Eklavya lectures) should
+    # use IST, not UTC. UTC midnight only arrives at 5:30 AM IST, so a
+    # cron scheduled any time before that (e.g. midnight IST, 2 AM IST)
+    # would otherwise see the WRONG calendar day and either skip work
+    # that should run, or mislabel content with yesterday's date.
+    return datetime.now(IST).date()
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
@@ -1354,7 +1366,7 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
     # any time before that (e.g. 2 AM IST) would otherwise still see
     # "yesterday" by server clock and correctly-but-confusingly skip
     # everything as "already done" even though it's already tomorrow here.
-    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
+    today = today_ist()
     today_day_num = (today - start).days + 1
 
     if today_day_num < 1:
@@ -1964,7 +1976,7 @@ def scam_ed():
             "lang": lang,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
             "origin": "user_submitted",
-            "origin_date": datetime.now(timezone.utc).date().isoformat(),
+            "origin_date": today_ist().isoformat(),
             "status": "pending",
         })
         pending["entries"] = pending["entries"][-500:]
@@ -3402,7 +3414,7 @@ def daily_marketing_trick():
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
     try:
-        today_str = datetime.now(timezone.utc).date().isoformat()
+        today_str = today_ist().isoformat()
 
         try:
             data, sha = github_get(TRICKS_FILE, site_token, timeout=8)
@@ -3630,7 +3642,7 @@ def daily_scam_ed():
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
     try:
-        today_str = datetime.now(timezone.utc).date().isoformat()
+        today_str = today_ist().isoformat()
 
         try:
             public_data, public_sha = github_get(PUBLIC_FILE, site_token, timeout=8)
