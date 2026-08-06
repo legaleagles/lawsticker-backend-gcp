@@ -1349,7 +1349,12 @@ def _llb5_generate_one_subject_lecture(subject, site_token, gemini_key):
         return {"ok": False, "subject": subject, "error": "No topic index yet — run /api/llb5-build-topics first."}
 
     start = datetime.fromisoformat(topics_data.get("start_date", LLB5_START_DATE)).date()
-    today = datetime.now(timezone.utc).date()
+    # "Today" needs to be IST, not UTC — this site and its students are in
+    # India, and UTC midnight only arrives at 5:30 AM IST. A cron running
+    # any time before that (e.g. 2 AM IST) would otherwise still see
+    # "yesterday" by server clock and correctly-but-confusingly skip
+    # everything as "already done" even though it's already tomorrow here.
+    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
     today_day_num = (today - start).days + 1
 
     if today_day_num < 1:
