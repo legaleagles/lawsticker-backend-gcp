@@ -1587,6 +1587,147 @@ def llb5_daily_lecture_all():
 
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 
+# ---------------------------------------------------------------------------
+# PYQ (Previous Year Questions) archive — Phase 1: upload a scanned or
+# text PDF of an old exam paper, Gemini reads it directly (handles both
+# clean text PDFs and scanned/photographed ones — no separate OCR step),
+# extracts every question into structured data, stored permanently per
+# subject per year. Never overwrites an existing year unless ?force=1.
+#
+# Deliberately NOT building: an AI "predicted paper" — this stays as
+# extraction + (later) frequency analysis only, matching what was asked.
+#
+# Phase 2 (topic-frequency ranking) and Phase 3 (surfacing "asked in
+# 2023, 2021" on Eklavya lecture pages) build on top of this once real
+# papers have been uploaded and the extraction quality is confirmed good.
+# ---------------------------------------------------------------------------
+
+def pyq_file(subject):
+    return f"llb-pyq-{subject}.json"
+
+
+PYQ_EXTRACTION_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "questions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "part": {"type": "STRING"},
+                    "question_number": {"type": "STRING"},
+                    "marks": {"type": "STRING"},
+                    "question_text": {"type": "STRING"},
+                    "sub_parts": {"type": "ARRAY", "items": {"type": "STRING"}},
+                },
+                "required": ["part", "question_number", "question_text"]
+            }
+        }
+    },
+    "required": ["questions"]
+}
+
+
+def build_pyq_extraction_prompt(subject_name):
+    return f"""This is a scanned or photographed past exam question paper for the LL.B. paper "{subject_name}". It may be a clean text PDF or a rough scan — read it carefully either way, including handwriting or faint print if present.
+
+Extract EVERY individual question exactly as written. Do not summarize, paraphrase, or skip anything — this needs to be a faithful, complete transcription for building a searchable archive, not a summary.
+
+For each question, give:
+part — the section/part it's in, e.g. "Part A", "Section I", "Unit 3" — use whatever labeling the paper itself uses; if the paper isn't divided into parts, use "General"
+question_number — exactly as printed (e.g. "1", "Q3", "5(a)")
+marks — the marks allotted if printed on the paper (e.g. "10"), else leave empty string
+question_text — the full question text, verbatim
+sub_parts — if the question has lettered sub-parts (a), (b), (c) that are meant to be answered together, list each sub-part's text here; otherwise leave as an empty array
+
+If any part of the scan is illegible, write "[illegible]" in that spot rather than guessing or inventing text — accuracy matters more than completeness here."""
+
+
+@app.route('/api/pyq-extract', methods=['POST'])
+def pyq_extract():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    subject = body.get("subject")
+    year = body.get("year")
+    pdf_base64 = body.get("pdf_base64")
+    force = body.get("force", False)
+
+    if subject not in LLB5_SUBJECTS:
+        return jsonify({"ok": False, "error": f"Unknown subject. Valid: {list(LLB5_SUBJECTS.keys())}"}), 400
+    if not year:
+        return jsonify({"ok": False, "error": "year is required."}), 400
+    if not pdf_base64:
+        return jsonify({"ok": False, "error": "pdf_base64 is required."}), 400
+
+    year = str(year)
+    fname = pyq_file(subject)
+
+    try:
+        data, sha = github_get(fname, site_token, timeout=8)
+        if data is None:
+            data = {"subject": subject, "papers": {}}
+    except Exception:
+        data, sha = {"subject": subject, "papers": {}}, None
+
+    if year in data.get("papers", {}) and not force:
+        return jsonify({"ok": True, "skipped": True, "reason": f"Year {year} already uploaded for this subject. Pass force:true to replace it."})
+
+    prompt = build_pyq_extraction_prompt(LLB5_SUBJECTS[subject]["name"])
+    parts = [
+        {"text": prompt},
+        {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
+    ]
+    payload = json.dumps({
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "maxOutputTokens": 8000,
+            "responseMimeType": "application/json",
+            "responseSchema": PYQ_EXTRACTION_SCHEMA,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={gemini_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode())
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(raw_text)
+    except urllib.error.HTTPError as he:
+        err_body = he.read().decode()
+        return jsonify({"ok": False, "error": f"Gemini error {he.code}: {err_body[:400]}"}), 502
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Extraction/parse error: {str(e)[:300]}"}), 502
+
+    questions = parsed.get("questions", [])
+    if not questions:
+        return jsonify({"ok": False, "error": "No questions were extracted — check the PDF is readable, or try a clearer scan."}), 502
+
+    data.setdefault("papers", {})[year] = {
+        "year": year,
+        "question_count": len(questions),
+        "questions": questions,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    data["subject"] = subject
+    data["subject_name"] = LLB5_SUBJECTS[subject]["name"]
+
+    try:
+        github_put(fname, site_token, data, sha, f"PYQ upload: {subject} {year} ({len(questions)} questions)", timeout=20)
+    except Exception as we:
+        return jsonify({"ok": False, "error": f"Extracted {len(questions)} questions but save failed: {str(we)[:300]}"}), 502
+
+    return jsonify({"ok": True, "subject": subject, "year": year, "question_count": len(questions)})
+
+
+
 
 def call_gemini_image(api_key, art_prompt):
     # Free-tier image model, used ONLY for background art — explicitly
