@@ -1,0 +1,38 @@
+name: Daily Scam Education Cron
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 6am UTC every day
+  workflow_dispatch:        # allows manual trigger from GitHub Actions UI
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call daily-scam-ed endpoint
+        run: |
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+            "https://lawsticker-backend-494996217030.europe-west1.run.app/api/daily-scam-ed")
+          BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:[0-9]*$//')
+          STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTP_STATUS://')
+
+          echo "HTTP Status: $STATUS"
+          echo "Response: $BODY"
+
+          if echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('ok') else 1)"; then
+            if echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('skipped') else 1)" 2>/dev/null; then
+              echo "⏭️ Skipped: $(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reason',''))")"
+            else
+              COUNT=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('generated',0))")
+              echo "✅ Generated $COUNT entries:"
+              echo $BODY | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('entries', []):
+    print(f\"  {e['ref_number']} | {e['category']} | {e['title']}\")
+"
+            fi
+          else
+            echo "❌ Error: $BODY"
+            exit 1
+          fi
