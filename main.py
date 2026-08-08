@@ -289,6 +289,47 @@ def update_gold_rate():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+GOLD_PURITY_FACTORS = {24: 1.0, 22: 0.916, 20: 0.833, 18: 0.75, 14: 0.585}
+
+
+@app.route('/api/live-gold-rate', methods=['GET'])
+def live_gold_rate():
+    # On-demand, click-triggered rate — fetches live every call, computes
+    # ALL common purities at once, and writes NOTHING to GitHub. No cron,
+    # no cached/possibly-stale value, no daily-job dependency at all.
+    # Real jewellery bills quote the rate for the exact purity being sold
+    # (e.g. a straight 22K rate), not a 24K reference rate the customer
+    # is expected to convert themselves — so every purity is returned
+    # ready to use directly, no further adjustment needed by the caller.
+    try:
+        gold = fetch_json("https://api.gold-api.com/price/XAU")
+        silver = fetch_json("https://api.gold-api.com/price/XAG")
+        fx = fetch_json("https://open.er-api.com/v6/latest/USD")
+        usd_to_inr = fx["rates"]["INR"]
+
+        try:
+            config, _ = github_get(CONFIG_FILE, os.environ.get("SITE_REPO_TOKEN"), timeout=8)
+            rates_cfg = (config or {}).get("rates", {})
+        except Exception:
+            rates_cfg = {}
+        gold_premium = rates_cfg.get("gold_india_premium_pct", 15)
+        silver_premium = rates_cfg.get("silver_india_premium_pct", 32)
+
+        gold_24k = compute_rate(gold["price"], usd_to_inr, gold_premium)
+        silver_999 = compute_rate(silver["price"], usd_to_inr, silver_premium)
+
+        gold_by_purity = {str(k): round(gold_24k * v) for k, v in GOLD_PURITY_FACTORS.items()}
+
+        return jsonify({
+            "ok": True,
+            "gold_by_purity_per_gram_inr": gold_by_purity,
+            "silver_999_per_gram_inr": silver_999,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
 # ---------------------------------------------------------------------------
 # 3. Community Pulse counter
 # ---------------------------------------------------------------------------
