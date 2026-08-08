@@ -1672,6 +1672,141 @@ def llb5_daily_lecture_all():
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 
 # ---------------------------------------------------------------------------
+# Today's Legal Update — replaces the old generic news-ticker (which pulled
+# irrelevant global wire stories and had a broken/never-scheduled refresh
+# cron). One genuinely significant Indian legal/rights development per day,
+# same trust model as Scam Stories: real search grounding required, a real
+# source URL gates publishing, nothing fabricated. Categorized into a clear
+# type (Supreme Court / High Court / New Law / Government Scheme /
+# Consumer Protection) so the type is unmistakable at a glance, not buried
+# in the text.
+# ---------------------------------------------------------------------------
+
+LEGAL_UPDATE_FILE = "legal-update.json"
+
+LEGAL_UPDATE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "update_type": {"type": "STRING"},
+        "court_or_authority": {"type": "STRING"},
+        "title_en": {"type": "STRING"}, "title_te": {"type": "STRING"}, "title_hi": {"type": "STRING"},
+        "summary_en": {"type": "STRING"}, "summary_te": {"type": "STRING"}, "summary_hi": {"type": "STRING"},
+        "why_it_matters_en": {"type": "STRING"}, "why_it_matters_te": {"type": "STRING"}, "why_it_matters_hi": {"type": "STRING"},
+    },
+    "required": [
+        "update_type", "court_or_authority",
+        "title_en", "title_te", "title_hi",
+        "summary_en", "summary_te", "summary_hi",
+        "why_it_matters_en", "why_it_matters_te", "why_it_matters_hi",
+    ]
+}
+
+LEGAL_UPDATE_TYPES = [
+    "Supreme Court", "High Court", "New Law or Amendment",
+    "Government Scheme or Notification", "Consumer Protection Order",
+]
+
+
+def build_legal_update_search_prompt():
+    types_list = ", ".join(LEGAL_UPDATE_TYPES)
+    return f"""Search for ONE genuinely significant, REAL Indian legal or rights development from the last few days — something that actually affects ordinary people's rights, money, or daily life, not routine procedural news.
+
+It must be exactly one of these types: {types_list}
+
+Good examples of "significant to ordinary people": a Supreme Court or High Court ruling that changes what a consumer/tenant/employee/patient can expect; a newly passed or amended law; a new or updated government welfare scheme with real eligibility; a Consumer Protection Commission or CCPA order against a company that sets a precedent.
+
+Avoid: routine case listings, procedural adjournments, political commentary, anything without a real, checkable source.
+
+Report back in plain text:
+1. Which of the 5 types above this is, and which specific court/authority (name the actual court — e.g. "Supreme Court of India", "Delhi High Court", "Ministry of Consumer Affairs" — not just "a court").
+2. What exactly happened/was decided/was announced — real specifics from the source.
+3. Why this actually matters to an ordinary person's rights or daily life.
+4. The real source (news report, official notification, court order) you found this from."""
+
+
+def build_legal_update_extraction_prompt(raw_text):
+    types_list = ", ".join(LEGAL_UPDATE_TYPES)
+    return f"""Extract this real legal/rights update into structured trilingual (English/Telugu/Hindi) data. Base everything strictly on the source material below — do not add anything not present in it.
+
+SOURCE MATERIAL:
+{raw_text}
+
+update_type — exactly one of: {types_list}
+court_or_authority — the specific real name (e.g. "Supreme Court of India", "Telangana High Court", "Ministry of Consumer Affairs")
+title_en/te/hi — a clear, specific headline (under 15 words), trilingual
+summary_en/te/hi — 2-3 sentences on what actually happened/was decided, trilingual
+why_it_matters_en/te/hi — 2-3 plain-language sentences on why an ordinary person should care, trilingual
+
+Keep the language plain and accessible — this is for people without a legal background."""
+
+
+@app.route('/api/daily-legal-update', methods=['GET'])
+def daily_legal_update():
+    # Cron target, once a day. Skips if today's update already exists —
+    # never overwrites a previous day, same append-only history pattern
+    # as scam-reports.json.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        today_str = today_ist().isoformat()
+
+        try:
+            data, sha = github_get(LEGAL_UPDATE_FILE, site_token, timeout=8)
+            if data is None:
+                data = {"history": {}}
+        except Exception:
+            data, sha = {"history": {}}, None
+
+        if today_str in data.get("history", {}):
+            return jsonify({"ok": True, "skipped": True, "reason": f"Already published today's update ({today_str})."})
+
+        # Phase 1: real search-grounded discovery
+        raw_text, source_urls = call_gemini_grounded(gemini_key, build_legal_update_search_prompt(), max_tokens=1500)
+        if not source_urls:
+            return jsonify({"ok": False, "error": "No real source found — nothing published today."}), 502
+
+        # Phase 2: structured trilingual extraction from the grounded text
+        parsed = call_gemini_structured(
+            gemini_key,
+            build_legal_update_extraction_prompt(raw_text),
+            LEGAL_UPDATE_SCHEMA,
+            max_tokens=2000,
+        )
+        if not parsed or not parsed.get("title_en"):
+            return jsonify({"ok": False, "error": "Extraction failed — nothing published today."}), 502
+
+        if parsed.get("update_type") not in LEGAL_UPDATE_TYPES:
+            return jsonify({"ok": False, "error": f"Unrecognized update_type: {parsed.get('update_type')} — nothing published today."}), 502
+
+        entry = {
+            "date": today_str,
+            "update_type": parsed["update_type"],
+            "court_or_authority": parsed["court_or_authority"],
+            "title_en": parsed["title_en"], "title_te": parsed["title_te"], "title_hi": parsed["title_hi"],
+            "summary_en": parsed["summary_en"], "summary_te": parsed["summary_te"], "summary_hi": parsed["summary_hi"],
+            "why_it_matters_en": parsed["why_it_matters_en"], "why_it_matters_te": parsed["why_it_matters_te"], "why_it_matters_hi": parsed["why_it_matters_hi"],
+            "source_url": source_urls[0]["uri"],
+            "source_title": source_urls[0].get("title", ""),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        data.setdefault("history", {})[today_str] = entry
+        # Keep the file from growing unbounded — retain the most recent 60 days
+        if len(data["history"]) > 60:
+            for old_date in sorted(data["history"].keys())[:-60]:
+                del data["history"][old_date]
+
+        github_put(LEGAL_UPDATE_FILE, site_token, data, sha, f"Legal update: {today_str} — {parsed['title_en'][:50]}", timeout=20)
+        return jsonify({"ok": True, "date": today_str, "update_type": parsed["update_type"], "title": parsed["title_en"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
 # PYQ (Previous Year Questions) archive — Phase 1: upload a scanned or
 # text PDF of an old exam paper, Gemini reads it directly (handles both
 # clean text PDFs and scanned/photographed ones — no separate OCR step),
