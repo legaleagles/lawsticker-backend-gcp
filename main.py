@@ -294,13 +294,47 @@ GOLD_PURITY_FACTORS = {24: 1.0, 22: 0.916, 20: 0.833, 18: 0.75, 14: 0.585}
 
 @app.route('/api/live-gold-rate', methods=['GET'])
 def live_gold_rate():
-    # On-demand, click-triggered rate — fetches live every call, computes
-    # ALL common purities at once, and writes NOTHING to GitHub. No cron,
-    # no cached/possibly-stale value, no daily-job dependency at all.
-    # Real jewellery bills quote the rate for the exact purity being sold
-    # (e.g. a straight 22K rate), not a 24K reference rate the customer
-    # is expected to convert themselves — so every purity is returned
-    # ready to use directly, no further adjustment needed by the caller.
+    # On-demand, click-triggered rate — fetches live every call, writes
+    # NOTHING to GitHub. No cron, no cached/possibly-stale value.
+    # Tries the REAL published rate first (same scraping technique this
+    # codebase already uses successfully for petrol/diesel), since that's
+    # the actual number jewellers use, not an approximation. Only falls
+    # back to the international-spot + assumed-premium estimate if the
+    # real source can't be reached or its page format has changed —
+    # and always tells the caller honestly which one was actually used.
+    city = request.args.get("city", "hyderabad")
+    try:
+        real_prices, matched_city = fetch_real_gold_rate(city)
+    except Exception:
+        real_prices, matched_city = None, city
+
+    if real_prices:
+        gold_by_purity = {k: real_prices[k] for k in ("24", "22", "20", "18", "14")}
+        # Silver isn't part of this fix's scope yet — keep it on the
+        # existing international-spot estimate so callers that always
+        # expect a silver figure (e.g. jewellery-suite.html) don't break.
+        silver_999 = None
+        try:
+            silver = fetch_json("https://api.gold-api.com/price/XAG")
+            fx = fetch_json("https://open.er-api.com/v6/latest/USD")
+            usd_to_inr = fx["rates"]["INR"]
+            config, _ = github_get(CONFIG_FILE, os.environ.get("SITE_REPO_TOKEN"), timeout=8)
+            silver_premium = ((config or {}).get("rates", {})).get("silver_india_premium_pct", 32)
+            silver_999 = compute_rate(silver["price"], usd_to_inr, silver_premium)
+        except Exception:
+            pass
+
+        return jsonify({
+            "ok": True,
+            "source": "goodreturns_real",
+            "city": matched_city,
+            "gold_by_purity_per_gram_inr": gold_by_purity,
+            "silver_999_per_gram_inr": silver_999,
+            "note": "24K/22K/18K are the real published rate for this city; 20K/14K are derived from the real 24K figure since those aren't published directly. Silver is still an estimate, not yet from a real published source.",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    # Fallback: estimate from international spot + assumed premium
     try:
         gold = fetch_json("https://api.gold-api.com/price/XAU")
         silver = fetch_json("https://api.gold-api.com/price/XAG")
@@ -322,12 +356,16 @@ def live_gold_rate():
 
         return jsonify({
             "ok": True,
+            "source": "estimated",
+            "city": matched_city,
             "gold_by_purity_per_gram_inr": gold_by_purity,
             "silver_999_per_gram_inr": silver_999,
+            "note": "Could not reach the real published rate for this city — showing an international-spot estimate instead, which can differ slightly from the real market rate.",
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
+
 
 
 # ---------------------------------------------------------------------------
@@ -3061,6 +3099,53 @@ def arrow_digest(current, previous):
     return " ➖ no change"
 
 
+# ---------------------------------------------------------------------------
+# Gold rate — real published rate, same technique as the petrol/diesel
+# scraper above (already proven working), instead of the earlier
+# international-spot-plus-guessed-premium approximation. IBJA itself
+# directs commercial/programmatic users to a paid subscription API for
+# this exact use case, so scraping IBJA directly isn't the right target —
+# GoodReturns republishes the same underlying benchmark and is already
+# the source this codebase relies on for petrol/diesel, so this is
+# consistent with what's already running, not a new category of risk.
+# ---------------------------------------------------------------------------
+
+GOLD_CITY_SLUGS = {
+    "hyderabad", "vijayawada", "visakhapatnam", "chennai", "bangalore", "mumbai", "delhi",
+    "kolkata", "pune", "ahmedabad", "jaipur", "lucknow", "kochi", "coimbatore", "nagpur",
+    "surat", "patna", "bhopal", "chandigarh", "guwahati",
+}
+
+
+def extract_gold_prices(text):
+    # Returns real published 24K/22K/18K per-gram rates, or None if the
+    # page's wording has changed and the pattern no longer matches —
+    # never guesses a number it can't actually find.
+    result = {}
+    for karat in ("24", "22", "18"):
+        m = re.search(rf"(?:₹|Rs\.?)\s*([\d,]+)\s*per gram for {karat} karat", text, re.IGNORECASE)
+        if m:
+            result[karat] = int(m.group(1).replace(",", ""))
+    return result if len(result) == 3 else None
+
+
+def fetch_real_gold_rate(city="hyderabad"):
+    city = city.lower().strip()
+    if city not in GOLD_CITY_SLUGS:
+        city = "hyderabad"
+    url = f"https://www.goodreturns.in/gold-rates/{city}.html"
+    text = fetch_text_digest(url)
+    prices = extract_gold_prices(text)
+    if not prices:
+        return None, city
+    # 20K/14K aren't published directly — derive from the real 24K figure
+    # using standard purity fractions, clearly distinguished from the
+    # three genuinely-scraped numbers when returned to the caller.
+    prices["20"] = round(prices["24"] * 0.833)
+    prices["14"] = round(prices["24"] * 0.585)
+    return prices, city
+
+
 def escape_html_digest(text):
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -3122,7 +3207,16 @@ def daily_digest():
 
         config, _ = github_get(DAILYDIGEST_CONFIG_FILE, site_token)
         rates = (config or {}).get("rates", {})
-        gold = rates.get("gold_24k_per_gram_inr")
+
+        # Prefer the real published rate (Hyderabad, matching the same city
+        # already used for petrol/diesel above) - same technique, same
+        # source, now consistent across everything in this digest instead
+        # of gold/silver quietly using a different, less accurate method.
+        real_prices, _ = fetch_real_gold_rate("hyderabad")
+        if real_prices:
+            gold = real_prices["24"]
+        else:
+            gold = rates.get("gold_24k_per_gram_inr")
         silver = rates.get("silver_999_per_gram_inr")
 
         if gold is None or silver is None:
