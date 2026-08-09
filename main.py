@@ -4693,10 +4693,31 @@ def _ga4_run_report(property_id, access_token, days=1):
         return json.loads(resp.read().decode())
 
 
+GA4_DIGEST_STATE_FILE = "ga4-digest-state.json"
+
+
+def build_ga4_analysis_prompt(period_label, total_users, total_views, top_pages_text, eklavya_views, eklavya_text):
+    return f"""You are looking at real Google Analytics traffic data for an Indian legal-empowerment website (lawsticker-ai.com — rights info, scam awareness, LLB study tools) for {period_label}.
+
+Totals: {total_users} users, {total_views} page views.
+
+Top pages:
+{top_pages_text}
+
+Eklavya (LLB study feature) pages: {eklavya_views} total views.
+{eklavya_text}
+
+Write a short (3-4 sentence), plain-language analysis for the site owner covering: what's actually driving traffic today, whether Eklavya's share of traffic looks healthy or worth attention, and one concrete, specific observation worth acting on (not generic advice like "keep posting content"). Be specific to the actual numbers given, not generic. Do not repeat the raw numbers back — interpret them."""
+
+
 @app.route('/api/ga4-daily-digest', methods=['GET'])
 def ga4_daily_digest():
     # Cron target — once a day is plenty. Pass ?days=N to summarize a
     # longer window (e.g. ?days=7 for a weekly view instead of yesterday).
+    # Pass ?analyze=1 to also have Gemini write a short interpretive
+    # analysis of the numbers (adds one Gemini call, off by default so a
+    # plain daily cron and a "with analysis" cron can both point at this
+    # same endpoint with different query strings).
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
     property_id = os.environ.get("GA4_PROPERTY_ID")
@@ -4709,6 +4730,7 @@ def ga4_daily_digest():
         days = int(request.args.get("days", 1))
     except ValueError:
         days = 1
+    do_analyze = request.args.get("analyze") == "1"
 
     try:
         access_token = _get_gcp_access_token()
@@ -4730,26 +4752,76 @@ def ga4_daily_digest():
         other_rows = [r for r in rows if r not in eklavya_rows][:10]
 
         period_label = "yesterday" if days == 1 else f"last {days} days"
+
+        # Extended: day-over-day trend, same arrow-indicator style already
+        # used for petrol/gold in the other Telegram digest.
+        try:
+            state, sha = github_get(GA4_DIGEST_STATE_FILE, os.environ.get("SITE_REPO_TOKEN"), timeout=8)
+        except Exception:
+            state, sha = None, None
+        prev = (state or {}).get(f"days_{days}", {})
+        views_arrow = arrow_digest(total_views, prev.get("views")) if prev.get("views") is not None else ""
+        users_arrow = arrow_digest(total_users, prev.get("users")) if prev.get("users") is not None else ""
+
         lines = [f"📊 <b>Site traffic — {period_label}</b>",
-                 f"👥 {total_users} users · 👁️ {total_views} page views (top 25 pages)\n"]
+                 f"👥 {total_users} users{users_arrow} · 👁️ {total_views} page views{views_arrow} (top 25 pages)\n"]
 
         lines.append("<b>Top pages:</b>")
+        top_pages_lines = []
         for r in other_rows:
             path = r["dimensionValues"][0]["value"]
             views = r["metricValues"][0]["value"]
-            lines.append(f"  • {path} — {views} views")
+            line = f"  • {path} — {views} views"
+            lines.append(line)
+            top_pages_lines.append(line)
 
+        eklavya_views = 0
+        eklavya_lines = []
         if eklavya_rows:
             eklavya_views = sum(int(r["metricValues"][0]["value"]) for r in eklavya_rows)
             lines.append(f"\n🏹 <b>Eklavya pages: {eklavya_views} total views</b>")
             for r in eklavya_rows[:10]:
                 path = r["dimensionValues"][0]["value"]
                 views = r["metricValues"][0]["value"]
-                lines.append(f"  • {path} — {views} views")
+                line = f"  • {path} — {views} views"
+                lines.append(line)
+                eklavya_lines.append(line)
         else:
             lines.append("\n🏹 <b>Eklavya pages:</b> no recorded views in this window.")
 
+        if do_analyze:
+            gemini_key = os.environ.get("GEMINI_API_KEY")
+            if gemini_key:
+                try:
+                    prompt = build_ga4_analysis_prompt(
+                        period_label, total_users, total_views,
+                        "\n".join(top_pages_lines) or "(none)",
+                        eklavya_views, "\n".join(eklavya_lines) or "(no Eklavya views)"
+                    )
+                    payload = json.dumps({
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"maxOutputTokens": 400},
+                    }).encode()
+                    req = urllib.request.Request(
+                        f"{GEMINI_URL}?key={gemini_key}",
+                        data=payload, headers={"Content-Type": "application/json"}, method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        result = json.loads(resp.read().decode())
+                    analysis_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    lines.append(f"\n🤖 <b>Analysis</b>\n{analysis_text}")
+                except Exception as ge:
+                    lines.append(f"\n🤖 <i>Analysis unavailable: {str(ge)[:150]}</i>")
+
         msg = "\n".join(lines)
+
+        # Save today's numbers as tomorrow's comparison point.
+        try:
+            new_state = state or {}
+            new_state[f"days_{days}"] = {"views": total_views, "users": total_users}
+            github_put(GA4_DIGEST_STATE_FILE, os.environ.get("SITE_REPO_TOKEN"), new_state, sha, "GA4 digest state update", timeout=15)
+        except Exception:
+            pass
 
     try:
         send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
