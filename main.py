@@ -1985,6 +1985,9 @@ def check_gold_bill():
     # itself is dated today, this is a direct accuracy check on the shop's quote.
     # If the bill is older, gold rate moves daily, so this becomes an explicit
     # "prices may have moved, verify before you pay" caution instead of a silent skip.
+    # This also feeds today_gold_rate below, which the frontend shows as a
+    # standalone banner (22K highlighted, 24K alongside) regardless of checks.
+    today_gold_rate = None
     try:
         bill_date_str = (extracted.get("bill_date") or "").strip()
         today_str_ist = today_ist().isoformat()
@@ -1999,9 +2002,14 @@ def check_gold_bill():
                 continue
         printed_rate = extracted.get("printed_gold_rate_per_gram") or 0
         purity = (extracted.get("item_purity_karat") or "22").replace("K", "").replace("k", "").strip()
-        if printed_rate > 0:
-            real_prices, matched_city = fetch_real_gold_rate(city)
-            if real_prices and purity in real_prices:
+        real_prices, matched_city = fetch_real_gold_rate(city)
+        if real_prices:
+            today_gold_rate = {
+                "city": matched_city,
+                "rate_22k": real_prices.get("22"),
+                "rate_24k": real_prices.get("24"),
+            }
+            if printed_rate > 0 and purity in real_prices:
                 real_rate = real_prices[purity]
                 diff = printed_rate - real_rate
                 if is_today:
@@ -2019,7 +2027,7 @@ def check_gold_bill():
     except Exception:
         pass
 
-    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table, "making_charge_range": making_charge_range})
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table, "making_charge_range": making_charge_range, "today_gold_rate": today_gold_rate})
 
 # ---------------------------------------------------------------------------
 # Today's Legal Update — replaces the old generic news-ticker (which pulled
