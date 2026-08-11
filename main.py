@@ -1813,12 +1813,23 @@ Be precise with numbers — this is being used to verify the shop's own arithmet
 
 
 def build_bill_context_prompt(extracted):
-    return f"""A customer photographed this jewellery estimate. Based on the extracted details below, give ONE short (2-3 sentence) plain-language observation about whether the making charge (VA%) looks typical for this specific type of item — a plain machine-made chain typically runs 6-12%, while an item with visible handwork like an antique or jhumka design can genuinely justify 18-25%+ as real skilled labour, not overcharging.
+    return f"""A customer photographed this jewellery estimate. Based on the item description, give the TYPICAL making-charge (VA%) range for this specific type of item in the Indian jewellery market — a plain machine-made chain typically runs 6-12%, while an item with visible handwork like an antique or jhumka design can genuinely justify 18-25%+ as real skilled labour, not overcharging.
 
 Item: {extracted.get('item_description', 'unknown')}
-VA%: {extracted.get('va_percent', 'not stated')}
+Bill's VA%: {extracted.get('va_percent', 'not stated')}
 
-Stay strictly descriptive and calibrated — never say "you are being cheated" or make a hard accusation. Say things like "this is on the higher end for a plain design" or "this is within the normal range for handwork of this kind." If you genuinely can't tell the item's complexity from the description alone, say so honestly instead of guessing."""
+Give a realistic typical_low_pct and typical_high_pct for THIS item type specifically (not a generic range), and a one-sentence plain note explaining what kind of work justifies that range for this item."""
+
+
+MAKING_CHARGE_CONTEXT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "typical_low_pct": {"type": "NUMBER"},
+        "typical_high_pct": {"type": "NUMBER"},
+        "note": {"type": "STRING"},
+    },
+    "required": ["typical_low_pct", "typical_high_pct", "note"]
+}
 
 
 def build_stone_price_prompt(stones):
@@ -1937,12 +1948,18 @@ def check_gold_bill():
     except Exception:
         pass
 
-    # Gemini: item-type-aware making-charge context
+    # Gemini: item-type-aware making-charge typical range (feeds the interactive slider)
+    making_charge_range = None
     try:
         context_prompt = build_bill_context_prompt(extracted)
-        context_text = call_gemini_structured(gemini_key, context_prompt, {"type": "OBJECT", "properties": {"observation": {"type": "STRING"}}, "required": ["observation"]}, max_tokens=300, timeout=25)
-        if context_text and context_text.get("observation"):
-            checks.append({"status": "info", "title": "Making charge, in context", "detail": context_text["observation"]})
+        range_result = call_gemini_structured(gemini_key, context_prompt, MAKING_CHARGE_CONTEXT_SCHEMA, max_tokens=300, timeout=25)
+        if range_result and range_result.get("typical_high_pct"):
+            making_charge_range = {
+                "bill_va_pct": extracted.get("va_percent") or 0,
+                "typical_low_pct": range_result["typical_low_pct"],
+                "typical_high_pct": range_result["typical_high_pct"],
+                "note": range_result.get("note", ""),
+            }
     except Exception:
         pass
 
@@ -1992,7 +2009,7 @@ def check_gold_bill():
     except Exception:
         pass
 
-    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table})
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table, "making_charge_range": making_charge_range})
 
 # ---------------------------------------------------------------------------
 # Today's Legal Update — replaces the old generic news-ticker (which pulled
