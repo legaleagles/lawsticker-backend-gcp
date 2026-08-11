@@ -3088,14 +3088,14 @@ def extract_fuel_price(text, fuel_word):
     return None
 
 
-def arrow_digest(current, previous):
+def arrow_digest(current, previous, unit="₹"):
     if previous is None:
         return ""
     diff = round(current - previous, 2)
     if diff > 0:
-        return f" 🔺 +₹{diff}"
+        return f" 🔺 +{unit}{diff}"
     elif diff < 0:
-        return f" 🔻 -₹{abs(diff)}"
+        return f" 🔻 -{unit}{abs(diff)}"
     return " ➖ no change"
 
 
@@ -4760,8 +4760,8 @@ def ga4_daily_digest():
         except Exception:
             state, sha = None, None
         prev = (state or {}).get(f"days_{days}", {})
-        views_arrow = arrow_digest(total_views, prev.get("views")) if prev.get("views") is not None else ""
-        users_arrow = arrow_digest(total_users, prev.get("users")) if prev.get("users") is not None else ""
+        views_arrow = arrow_digest(total_views, prev.get("views"), unit="") if prev.get("views") is not None else ""
+        users_arrow = arrow_digest(total_users, prev.get("users"), unit="") if prev.get("users") is not None else ""
 
         lines = [f"📊 <b>Site traffic — {period_label}</b>",
                  f"👥 {total_users} users{users_arrow} · 👁️ {total_views} page views{views_arrow} (top 25 pages)\n"]
