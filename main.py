@@ -1827,7 +1827,41 @@ def build_stone_price_prompt(stones):
 
 {stone_list}
 
-For each one, report a realistic typical price RANGE (not a single number — gemstone pricing genuinely varies by quality/clarity/cut, which isn't visible from a bill). Note clearly that this is a rough guide based on search results, not a verified valuation, since actual fair pricing depends on the specific stone's quality — something no bill or search can determine."""
+For each one, report a realistic typical price RANGE (not a single number — gemstone pricing genuinely varies by quality/clarity/cut, which isn't visible from a bill)."""
+
+
+STONE_PRICE_STRUCTURE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "stones": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "stone_type": {"type": "STRING"},
+                    "bill_rate_per_ct": {"type": "NUMBER"},
+                    "market_low_per_ct": {"type": "NUMBER"},
+                    "market_high_per_ct": {"type": "NUMBER"},
+                },
+                "required": ["stone_type", "bill_rate_per_ct", "market_low_per_ct", "market_high_per_ct"]
+            }
+        }
+    },
+    "required": ["stones"]
+}
+
+
+def build_stone_structure_prompt(raw_search_text, stones):
+    stone_list = "\n".join(f"- {s.get('stone_type','?')}: bill says ₹{s.get('rate_per_ct',0)}/ct" for s in stones)
+    return f"""Convert this search research into clean structured numbers ONLY — no explanations, no paragraphs.
+
+SEARCH RESEARCH:
+{raw_search_text}
+
+STONES ON THE BILL:
+{stone_list}
+
+For each stone type, extract: the bill's own rate, and a market low/high per-carat range from the research above. If the research didn't clearly cover a stone, give your best realistic estimate for that stone type in the Indian retail market instead of leaving it blank."""
 
 
 @app.route('/api/check-gold-bill', methods=['POST'])
@@ -1914,11 +1948,19 @@ def check_gold_bill():
 
     # Gemini + search: stone price range (only if stones present)
     stones = extracted.get("stones") or []
+    stone_price_table = None
     if stones:
         try:
-            stone_text, stone_sources = call_gemini_grounded(gemini_key, build_stone_price_prompt(stones), max_tokens=600)
+            stone_text, stone_sources = call_gemini_grounded(gemini_key, build_stone_price_prompt(stones), max_tokens=700)
             if stone_text:
-                checks.append({"status": "info", "title": "Stone pricing — rough market range", "detail": stone_text.strip()})
+                structured = call_gemini_structured(
+                    gemini_key,
+                    build_stone_structure_prompt(stone_text, stones),
+                    STONE_PRICE_STRUCTURE_SCHEMA,
+                    max_tokens=500, timeout=20,
+                )
+                if structured and structured.get("stones"):
+                    stone_price_table = structured["stones"]
         except Exception:
             pass
 
@@ -1950,7 +1992,7 @@ def check_gold_bill():
     except Exception:
         pass
 
-    return jsonify({"ok": True, "extracted": extracted, "checks": checks})
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table})
 
 # ---------------------------------------------------------------------------
 # Today's Legal Update — replaces the old generic news-ticker (which pulled
