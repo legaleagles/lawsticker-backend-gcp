@@ -1834,11 +1834,11 @@ MAKING_CHARGE_CONTEXT_SCHEMA = {
 
 def build_stone_price_prompt(stones):
     stone_list = "\n".join(f"- {s.get('stone_type','?')}: {s.get('weight_ct',0)} ct at ₹{s.get('rate_per_ct',0)}/ct" for s in stones)
-    return f"""Search for typical current Indian retail market pricing (per carat, in INR) for these gemstone/bead types used in jewellery:
+    return f"""Search for typical current Indian retail JEWELLERY-SETTING market pricing (per carat, in INR) for these gemstone/bead types, as sold set into gold jewellery at a regular jewellery shop (NOT loose certified gemstones sold by gem dealers, which have a much wider and higher range):
 
 {stone_list}
 
-For each one, report a realistic typical price RANGE (not a single number — gemstone pricing genuinely varies by quality/clarity/cut, which isn't visible from a bill)."""
+For each one, report a realistic, NARROW typical range that a normal customer would actually see on a jewellery shop bill — center the range around commercial/synthetic-grade quality (CZ, synthetic ruby/emerald, commercial-grade natural beads and pearls), not rare fine-quality natural gemstones. Avoid quoting the full theoretical low-to-high spread of the entire gem trade (e.g. do not say a range like ₹50 to ₹1,500 for CZ or ₹500 to ₹1,00,000 for ruby — that spans loose-stone and investment-grade pricing and is not useful for checking a jewellery bill). If the bill's own rate for a stone looks broadly plausible for jewellery-grade material, your range should sensibly bracket it rather than dwarf it."""
 
 
 STONE_PRICE_STRUCTURE_SCHEMA = {
@@ -1872,7 +1872,7 @@ SEARCH RESEARCH:
 STONES ON THE BILL:
 {stone_list}
 
-For each stone type, extract: the bill's own rate, and a market low/high per-carat range from the research above. If the research didn't clearly cover a stone, give your best realistic estimate for that stone type in the Indian retail market instead of leaving it blank."""
+For each stone type, extract: the bill's own rate, and a market low/high per-carat range from the research above. Keep the range realistic and narrow for JEWELLERY-SHOP commercial-grade material (not the full loose-gemstone trade spread) — if the research itself gave an unrealistically wide range, tighten it to the portion most relevant to ordinary jewellery-shop pricing rather than repeating the full spread. If the research didn't clearly cover a stone, give your best realistic narrow estimate for that stone type in the Indian retail jewellery market instead of leaving it blank."""
 
 
 @app.route('/api/check-gold-bill', methods=['POST'])
@@ -1981,31 +1981,41 @@ def check_gold_bill():
         except Exception:
             pass
 
-    # Live gold rate check — only meaningful if the bill is dated today
+    # Live gold rate check — always shown against TODAY's real rate. If the bill
+    # itself is dated today, this is a direct accuracy check on the shop's quote.
+    # If the bill is older, gold rate moves daily, so this becomes an explicit
+    # "prices may have moved, verify before you pay" caution instead of a silent skip.
     try:
         bill_date_str = (extracted.get("bill_date") or "").strip()
         today_str_ist = today_ist().isoformat()
         is_today = False
+        parsed_bill_date = None
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
-                parsed = datetime.strptime(bill_date_str.split(" ")[0], fmt).date()
-                is_today = parsed.isoformat() == today_str_ist
+                parsed_bill_date = datetime.strptime(bill_date_str.split(" ")[0], fmt).date()
+                is_today = parsed_bill_date.isoformat() == today_str_ist
                 break
             except Exception:
                 continue
         printed_rate = extracted.get("printed_gold_rate_per_gram") or 0
         purity = (extracted.get("item_purity_karat") or "22").replace("K", "").replace("k", "").strip()
-        if is_today and printed_rate > 0:
+        if printed_rate > 0:
             real_prices, matched_city = fetch_real_gold_rate(city)
             if real_prices and purity in real_prices:
                 real_rate = real_prices[purity]
                 diff = printed_rate - real_rate
-                if abs(diff) < 50:
-                    checks.append({"status": "ok", "title": "Gold rate matches today's real published rate",
-                                    "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g."})
+                if is_today:
+                    if abs(diff) < 50:
+                        checks.append({"status": "ok", "title": "Gold rate matches today's real published rate",
+                                        "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g."})
+                    else:
+                        checks.append({"status": "warn", "title": "Gold rate differs from today's real published rate",
+                                        "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g, a difference of ₹{abs(round(diff))}/g."})
                 else:
-                    checks.append({"status": "warn", "title": "Gold rate differs from today's real published rate",
-                                    "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g, a difference of ₹{abs(round(diff))}/g."})
+                    date_label = parsed_bill_date.strftime("%d %b %Y") if parsed_bill_date else (bill_date_str or "an earlier date")
+                    direction = "higher" if diff < 0 else "lower" if diff > 0 else "the same as"
+                    checks.append({"status": "caution", "title": "This bill is old — check today's rate before you pay",
+                                    "detail": f"This estimate was dated {date_label}, quoting ₹{printed_rate}/g. Today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g — {direction} than what's on this old bill. Gold rates change daily, so if you're about to finalize a purchase or negotiate using this estimate, confirm today's rate with the shop first rather than relying on this printed figure."})
     except Exception:
         pass
 
