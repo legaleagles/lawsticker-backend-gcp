@@ -2774,7 +2774,7 @@ Stay factual and general. Use simple, everyday language. If you're not confident
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "maxOutputTokens": 1200,
+            "maxOutputTokens": 3000,
             "responseMimeType": "application/json",
             "responseSchema": ENRICH_SCHEMA,
         },
@@ -4474,6 +4474,15 @@ def daily_scam_ed():
                 "reported_count":   1,
                 "status":           "approved",
             }
+
+            # Generate trilingual enrichment (modus operandi, red flags, laws)
+            try:
+                enrichment = call_gemini_enrichment(gemini_key, parsed["category"], parsed["story_en"], "en")
+                if enrichment:
+                    entry["enrichment"] = enrichment
+            except Exception:
+                pass
+
             public_entries.append(entry)
             generated.append((entry, ref_number))
 
@@ -4581,6 +4590,63 @@ def backfill_translations():
         return jsonify({
             "ok": True,
             "translated": translated,
+            "skipped": skipped,
+            "errors": errors,
+        })
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/api/fix-enrichment', methods=['GET'])
+def fix_enrichment():
+    """Backfill missing enrichment (modus operandi/red flags/laws) for already-published
+    entries that were approved before the enrichment call was added to the cron pipeline."""
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        public_data, public_sha = github_get(PUBLIC_FILE, site_token, timeout=10)
+        if not public_data:
+            return jsonify({"ok": False, "error": "Could not read public file."}), 500
+
+        entries = public_data.get("entries", [])
+        enriched = 0
+        skipped = 0
+        errors = []
+
+        for entry in entries:
+            existing = entry.get("enrichment")
+            if existing and existing.get("modus_operandi_te"):
+                skipped += 1
+                continue
+
+            story = entry.get("story_en") or entry.get("anonymized_story") or ""
+            category = entry.get("category") or ""
+            if not story or not category:
+                skipped += 1
+                continue
+
+            try:
+                result = call_gemini_enrichment(gemini_key, category, story, "en")
+                if result and result.get("modus_operandi_te"):
+                    entry["enrichment"] = result
+                    enriched += 1
+                else:
+                    errors.append(entry.get("ref_number", entry.get("id", "?")) + ": empty/incomplete response")
+            except Exception as ex:
+                errors.append(entry.get("ref_number", entry.get("id", "?")) + ": " + str(ex))
+
+        if enriched:
+            public_data["entries"] = entries
+            github_put(PUBLIC_FILE, site_token, public_data, public_sha,
+                       f"Backfill enrichment for {enriched} entries", timeout=20)
+
+        return jsonify({
+            "ok": True,
+            "enriched": enriched,
             "skipped": skipped,
             "errors": errors,
         })

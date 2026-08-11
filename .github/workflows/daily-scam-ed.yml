@@ -36,3 +36,23 @@ for e in d.get('entries', []):
             echo "❌ Error: $BODY"
             exit 1
           fi
+
+      - name: Backfill missing translations (title/story te+hi)
+        run: |
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+            "https://lawsticker-backend-494996217030.europe-west1.run.app/api/backfill-translations")
+          BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:[0-9]*$//')
+          TRANSLATED=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('translated',0))" 2>/dev/null || echo 0)
+          echo "📝 Backfill translations: $TRANSLATED entries updated"
+
+      - name: Backfill missing enrichment (modus operandi, red flags, laws)
+        run: |
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+            "https://lawsticker-backend-494996217030.europe-west1.run.app/api/fix-enrichment")
+          BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:[0-9]*$//')
+          ENRICHED=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('enriched',0))" 2>/dev/null || echo 0)
+          ERRORS=$(echo $BODY | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('errors',[]))" 2>/dev/null || echo [])
+          echo "🔍 Enrichment backfill: $ENRICHED entries updated"
+          if [ "$ERRORS" != "[]" ]; then
+            echo "⚠️ Errors: $ERRORS"
+          fi
