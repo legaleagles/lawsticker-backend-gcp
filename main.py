@@ -1751,6 +1751,208 @@ def llb5_daily_lecture_all():
 GEMINI_IMAGE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 
 # ---------------------------------------------------------------------------
+# Gold Bill Checker — reads a photographed jewellery estimate/bill (any
+# shop's format) and produces a plain-language "Negotiation Report Card":
+# arithmetic check, making-charge method detection, item-type context,
+# live gold-rate cross-check (only when the bill is dated today), and a
+# stone-price range via real search. Deliberately never says "you were
+# cheated" — only calibrated, specific observations the person can act on
+# themselves. Separate page, does not touch the existing jewellery-suite.
+# ---------------------------------------------------------------------------
+
+BILL_EXTRACT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "shop_name": {"type": "STRING"},
+        "bill_date": {"type": "STRING"},
+        "printed_gold_rate_per_gram": {"type": "NUMBER"},
+        "item_description": {"type": "STRING"},
+        "item_purity_karat": {"type": "STRING"},
+        "gross_weight_g": {"type": "NUMBER"},
+        "stone_weight_g": {"type": "NUMBER"},
+        "net_weight_g": {"type": "NUMBER"},
+        "va_percent": {"type": "NUMBER"},
+        "va_amount": {"type": "NUMBER"},
+        "item_weight_after_va_g": {"type": "NUMBER"},
+        "gold_value_amount": {"type": "NUMBER"},
+        "stones": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "stone_type": {"type": "STRING"},
+                    "weight_ct": {"type": "NUMBER"},
+                    "rate_per_ct": {"type": "NUMBER"},
+                    "amount": {"type": "NUMBER"},
+                },
+                "required": ["stone_type", "weight_ct", "rate_per_ct", "amount"]
+            }
+        },
+        "total_stone_cost": {"type": "NUMBER"},
+        "making_charge_amount": {"type": "NUMBER"},
+        "gst_percent": {"type": "NUMBER"},
+        "gst_amount": {"type": "NUMBER"},
+        "final_amount": {"type": "NUMBER"},
+    },
+    "required": ["item_description", "net_weight_g", "final_amount"]
+}
+
+
+def build_bill_extract_prompt():
+    return """This is a photographed jewellery shop estimate/bill — the format varies completely by shop, read whatever is actually printed, don't assume a fixed layout.
+
+Extract every field you can genuinely find on this specific bill. If a field isn't present on this bill, leave it as 0 or an empty string — never invent or guess a number that isn't actually printed.
+
+Pay close attention to:
+- Whether "Item Wt" (weight after making-charge addition) is shown separately from "Net Wt" — this matters a lot, extract both exactly as printed if both appear.
+- Every individual stone listed as its own line (type, weight in carats, rate per carat, amount) — do not combine stones into one total, list each one exactly as its own row.
+- The exact printed "Today's Gold Rate" or "Cost Of Gold ... /gm" figure — this is the shop's own stated rate, extract it precisely.
+- The bill's date exactly as printed.
+
+Be precise with numbers — this is being used to verify the shop's own arithmetic, so accuracy matters more than anything else."""
+
+
+def build_bill_context_prompt(extracted):
+    return f"""A customer photographed this jewellery estimate. Based on the extracted details below, give ONE short (2-3 sentence) plain-language observation about whether the making charge (VA%) looks typical for this specific type of item — a plain machine-made chain typically runs 6-12%, while an item with visible handwork like an antique or jhumka design can genuinely justify 18-25%+ as real skilled labour, not overcharging.
+
+Item: {extracted.get('item_description', 'unknown')}
+VA%: {extracted.get('va_percent', 'not stated')}
+
+Stay strictly descriptive and calibrated — never say "you are being cheated" or make a hard accusation. Say things like "this is on the higher end for a plain design" or "this is within the normal range for handwork of this kind." If you genuinely can't tell the item's complexity from the description alone, say so honestly instead of guessing."""
+
+
+def build_stone_price_prompt(stones):
+    stone_list = "\n".join(f"- {s.get('stone_type','?')}: {s.get('weight_ct',0)} ct at ₹{s.get('rate_per_ct',0)}/ct" for s in stones)
+    return f"""Search for typical current Indian retail market pricing (per carat, in INR) for these gemstone/bead types used in jewellery:
+
+{stone_list}
+
+For each one, report a realistic typical price RANGE (not a single number — gemstone pricing genuinely varies by quality/clarity/cut, which isn't visible from a bill). Note clearly that this is a rough guide based on search results, not a verified valuation, since actual fair pricing depends on the specific stone's quality — something no bill or search can determine."""
+
+
+@app.route('/api/check-gold-bill', methods=['POST'])
+def check_gold_bill():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    image_base64 = body.get("image_base64")
+    image_mime = body.get("image_mime", "image/jpeg")
+    city = body.get("city", "hyderabad")
+    if not image_base64:
+        return jsonify({"ok": False, "error": "image_base64 is required."}), 400
+
+    # Phase 1: vision extraction
+    try:
+        parts = [
+            {"text": build_bill_extract_prompt()},
+            {"inline_data": {"mime_type": image_mime, "data": image_base64}},
+        ]
+        payload = json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "maxOutputTokens": 3000,
+                "responseMimeType": "application/json",
+                "responseSchema": BILL_EXTRACT_SCHEMA,
+            },
+        }).encode()
+        req = urllib.request.Request(
+            f"{GEMINI_URL}?key={gemini_key}",
+            data=payload, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            result = json.loads(resp.read().decode())
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        extracted = json.loads(raw_text)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this bill: {str(e)[:300]}"}), 502
+
+    checks = []
+
+    # Deterministic check 1: arithmetic verification (pure math, no AI)
+    try:
+        gold_val = extracted.get("gold_value_amount") or 0
+        stone_val = extracted.get("total_stone_cost") or 0
+        mc = extracted.get("making_charge_amount") or 0
+        gst_amt = extracted.get("gst_amount") or 0
+        final = extracted.get("final_amount") or 0
+        computed = gold_val + stone_val + mc + gst_amt
+        if final > 0 and gold_val > 0:
+            diff_pct = abs(computed - final) / final * 100
+            if diff_pct < 1:
+                checks.append({"status": "ok", "title": "Arithmetic checks out",
+                                "detail": f"Gold value + stones + making charge + GST adds up to the final amount printed."})
+            else:
+                checks.append({"status": "warn", "title": "The printed total doesn't quite match the line items",
+                                "detail": f"Adding up the individual lines gives ₹{round(computed):,}, but the bill's final amount is ₹{round(final):,} — worth asking the shop to explain the difference."})
+    except Exception:
+        pass
+
+    # Deterministic check 2: making-charge method (% of value vs % of weight)
+    try:
+        net_wt = extracted.get("net_weight_g") or 0
+        item_wt = extracted.get("item_weight_after_va_g") or 0
+        va_pct = extracted.get("va_percent") or 0
+        if net_wt > 0 and item_wt > net_wt and va_pct > 0:
+            expected_weight_based = net_wt * (1 + va_pct / 100)
+            if abs(expected_weight_based - item_wt) / item_wt < 0.02:
+                checks.append({"status": "info", "title": f"Making charge is applied on WEIGHT, not value",
+                                "detail": f"This shop adds {va_pct}% to the gold's weight first ({net_wt}g → {item_wt}g), then prices that higher weight — not the more common 'percent of rupee value' method. Worth knowing which method you're comparing when shopping around."})
+    except Exception:
+        pass
+
+    # Gemini: item-type-aware making-charge context
+    try:
+        context_prompt = build_bill_context_prompt(extracted)
+        context_text = call_gemini_structured(gemini_key, context_prompt, {"type": "OBJECT", "properties": {"observation": {"type": "STRING"}}, "required": ["observation"]}, max_tokens=300, timeout=25)
+        if context_text and context_text.get("observation"):
+            checks.append({"status": "info", "title": "Making charge, in context", "detail": context_text["observation"]})
+    except Exception:
+        pass
+
+    # Gemini + search: stone price range (only if stones present)
+    stones = extracted.get("stones") or []
+    if stones:
+        try:
+            stone_text, stone_sources = call_gemini_grounded(gemini_key, build_stone_price_prompt(stones), max_tokens=600)
+            if stone_text:
+                checks.append({"status": "info", "title": "Stone pricing — rough market range", "detail": stone_text.strip()})
+        except Exception:
+            pass
+
+    # Live gold rate check — only meaningful if the bill is dated today
+    try:
+        bill_date_str = (extracted.get("bill_date") or "").strip()
+        today_str_ist = today_ist().isoformat()
+        is_today = False
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                parsed = datetime.strptime(bill_date_str.split(" ")[0], fmt).date()
+                is_today = parsed.isoformat() == today_str_ist
+                break
+            except Exception:
+                continue
+        printed_rate = extracted.get("printed_gold_rate_per_gram") or 0
+        purity = (extracted.get("item_purity_karat") or "22").replace("K", "").replace("k", "").strip()
+        if is_today and printed_rate > 0:
+            real_prices, matched_city = fetch_real_gold_rate(city)
+            if real_prices and purity in real_prices:
+                real_rate = real_prices[purity]
+                diff = printed_rate - real_rate
+                if abs(diff) < 50:
+                    checks.append({"status": "ok", "title": "Gold rate matches today's real published rate",
+                                    "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g."})
+                else:
+                    checks.append({"status": "warn", "title": "Gold rate differs from today's real published rate",
+                                    "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g, a difference of ₹{abs(round(diff))}/g."})
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks})
+
+# ---------------------------------------------------------------------------
 # Today's Legal Update — replaces the old generic news-ticker (which pulled
 # irrelevant global wire stories and had a broken/never-scheduled refresh
 # cron). One genuinely significant Indian legal/rights development per day,
