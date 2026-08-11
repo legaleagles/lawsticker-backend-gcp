@@ -1804,10 +1804,12 @@ def build_bill_extract_prompt():
 Extract every field you can genuinely find on this specific bill. If a field isn't present on this bill, leave it as 0 or an empty string — never invent or guess a number that isn't actually printed.
 
 Pay close attention to:
-- Whether "Item Wt" (weight after making-charge addition) is shown separately from "Net Wt" — this matters a lot, extract both exactly as printed if both appear.
+- Whether "Item Wt" (weight after making-charge addition) is shown separately from "Net Wt" — this matters a lot, extract both exactly as printed if both appear. If the bill shows this weight-uplift pattern and does NOT separately print a rupee "making charge amount" line, set making_charge_amount to 0 — the making charge is already embedded in the gold value via the higher weight, and inventing a rupee figure for it here would double-count it.
 - Every individual stone listed as its own line (type, weight in carats, rate per carat, amount) — do not combine stones into one total, list each one exactly as its own row.
 - The exact printed "Today's Gold Rate" or "Cost Of Gold ... /gm" figure — this is the shop's own stated rate, extract it precisely.
 - The bill's date exactly as printed.
+
+Never invent a number for any field that isn't genuinely printed or computable from what's printed — leave it 0 or empty instead. This especially applies to making_charge_amount when only a weight uplift is shown.
 
 Be precise with numbers — this is being used to verify the shop's own arithmetic, so accuracy matters more than anything else."""
 
@@ -1916,26 +1918,10 @@ def check_gold_bill():
 
     checks = []
 
-    # Deterministic check 1: arithmetic verification (pure math, no AI)
-    try:
-        gold_val = extracted.get("gold_value_amount") or 0
-        stone_val = extracted.get("total_stone_cost") or 0
-        mc = extracted.get("making_charge_amount") or 0
-        gst_amt = extracted.get("gst_amount") or 0
-        final = extracted.get("final_amount") or 0
-        computed = gold_val + stone_val + mc + gst_amt
-        if final > 0 and gold_val > 0:
-            diff_pct = abs(computed - final) / final * 100
-            if diff_pct < 1:
-                checks.append({"status": "ok", "title": "Arithmetic checks out",
-                                "detail": f"Gold value + stones + making charge + GST adds up to the final amount printed."})
-            else:
-                checks.append({"status": "warn", "title": "The printed total doesn't quite match the line items",
-                                "detail": f"Adding up the individual lines gives ₹{round(computed):,}, but the bill's final amount is ₹{round(final):,} — worth asking the shop to explain the difference."})
-    except Exception:
-        pass
-
-    # Deterministic check 2: making-charge method (% of value vs % of weight)
+    # Deterministic check A: making-charge method (% of value vs % of weight).
+    # Run BEFORE the arithmetic check below, because the answer changes what
+    # "correct arithmetic" even means for this bill.
+    mc_is_weight_based = False
     try:
         net_wt = extracted.get("net_weight_g") or 0
         item_wt = extracted.get("item_weight_after_va_g") or 0
@@ -1943,8 +1929,36 @@ def check_gold_bill():
         if net_wt > 0 and item_wt > net_wt and va_pct > 0:
             expected_weight_based = net_wt * (1 + va_pct / 100)
             if abs(expected_weight_based - item_wt) / item_wt < 0.02:
+                mc_is_weight_based = True
                 checks.append({"status": "info", "title": f"Making charge is applied on WEIGHT, not value",
                                 "detail": f"This shop adds {va_pct}% to the gold's weight first ({net_wt}g → {item_wt}g), then prices that higher weight — not the more common 'percent of rupee value' method. Worth knowing which method you're comparing when shopping around."})
+    except Exception:
+        pass
+
+    # Deterministic check B: arithmetic verification (pure math, no AI).
+    # When the making charge is weight-based (check A above), it is already
+    # folded into gold_value_amount via the inflated weight — there is no
+    # separate rupee making-charge line on the bill itself. Adding
+    # making_charge_amount again here would double-count it and can produce
+    # a false "math doesn't add up" accusation against a shop that billed
+    # correctly — this is exactly what happened on a real test bill, so this
+    # check now only adds the making-charge line when it's genuinely a
+    # separate value-based charge.
+    try:
+        gold_val = extracted.get("gold_value_amount") or 0
+        stone_val = extracted.get("total_stone_cost") or 0
+        mc = 0 if mc_is_weight_based else (extracted.get("making_charge_amount") or 0)
+        gst_amt = extracted.get("gst_amount") or 0
+        final = extracted.get("final_amount") or 0
+        computed = gold_val + stone_val + mc + gst_amt
+        if final > 0 and gold_val > 0:
+            diff_pct = abs(computed - final) / final * 100
+            if diff_pct < 1:
+                checks.append({"status": "ok", "title": "Arithmetic checks out",
+                                "detail": "Gold value + stones" + ("" if mc_is_weight_based else " + making charge") + " + GST adds up to the final amount printed." + (" (Making charge here is already inside the gold value via the weight uplift above, not a separate line.)" if mc_is_weight_based else "")})
+            else:
+                checks.append({"status": "warn", "title": "The printed total doesn't quite match the line items",
+                                "detail": f"Adding up the individual lines gives ₹{round(computed):,}, but the bill's final amount is ₹{round(final):,} — worth asking the shop to explain the difference."})
     except Exception:
         pass
 
@@ -1963,7 +1977,12 @@ def check_gold_bill():
     except Exception:
         pass
 
-    # Gemini + search: stone price range (only if stones present)
+    # Gemini + search: stone price range (only if stones present).
+    # weight_ct and the bill's own rupee amount are merged back in from the
+    # ORIGINAL extracted stones list (by matching stone_type), not re-asked
+    # of the structuring AI call — these are pure math facts already read off
+    # the bill in phase 1, and the interactive slider on the frontend needs
+    # them to compute live totals.
     stones = extracted.get("stones") or []
     stone_price_table = None
     if stones:
@@ -1978,6 +1997,23 @@ def check_gold_bill():
                 )
                 if structured and structured.get("stones"):
                     stone_price_table = structured["stones"]
+                    orig_by_type = {}
+                    for s in stones:
+                        key = (s.get("stone_type") or "").strip().lower()
+                        if key:
+                            orig_by_type[key] = s
+                    orig_in_order = list(stones)
+                    for i, row in enumerate(stone_price_table):
+                        key = (row.get("stone_type") or "").strip().lower()
+                        match = orig_by_type.get(key)
+                        if not match and i < len(orig_in_order):
+                            match = orig_in_order[i]
+                        if match:
+                            row["weight_ct"] = match.get("weight_ct") or 0
+                            row["bill_amount"] = match.get("amount") or (row.get("bill_rate_per_ct", 0) * (match.get("weight_ct") or 0))
+                        else:
+                            row["weight_ct"] = 0
+                            row["bill_amount"] = 0
         except Exception:
             pass
 
