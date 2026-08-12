@@ -5059,14 +5059,33 @@ def post_youtube_reply(access_token, parent_comment_id, reply_text):
         return json.loads(resp.read().decode())
 
 
+RANK_QUESTION_PATTERN = re.compile(
+    r"\b(rank|seat|cutoff|cut off|vacancy|counsel?ling|phase\s*2|2nd phase|category|"
+    r"oc|bc-?a|bc-?b|bc-?c|bc-?d|bc-?e|sc|st|ews|vasthada|vastundi|osthada|"
+    r"chance|allot)\b", re.IGNORECASE)
+
+
+def is_rank_seat_question(text):
+    # Deterministic keyword match, not left to the model's own judgement —
+    # this exact pattern (rank/category/phase question, often Tenglish) is
+    # the single most common comment type and MUST always get answered via
+    # the tool link, never silently escalated because the model played it
+    # safe on the in_scope call.
+    hits = len(RANK_QUESTION_PATTERN.findall(text or ""))
+    return hits >= 2
+
+
 def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_id_config, subscriber_count):
     # Draft a reply strictly from site content; escalate to Telegram instead
     # of posting anything if it's not confidently covered.
+    forced_rank_question = is_rank_seat_question(comment["text"])
     try:
         kb, _ = github_get(KB_FILE, site_token, timeout=6)
         entries = (kb or {}).get("entries", [])
         relevant_entries = filter_relevant_entries_askai(comment["text"], entries, topic="lawcet")
         prompt = build_youtube_reply_prompt(comment["text"], comment["video_title"], relevant_entries)
+        if forced_rank_question:
+            prompt += "\n\nIMPORTANT: This comment has already been detected as a rank/seat/category question by our system. You MUST set in_scope=true and answer it using the LAWCET PHASE 2 TOOLS rule above (identify 3-year vs 5-year course, point to the matching tool link) — do not set in_scope=false for this comment under any circumstance."
         drafted = call_gemini_structured(gemini_key, prompt, YT_REPLY_SCHEMA, max_tokens=500, timeout=20)
     except Exception:
         drafted = None
@@ -5081,12 +5100,26 @@ def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_
         f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
     )
 
-    if not drafted or not drafted.get("in_scope") or not (drafted.get("reply_text") or "").strip():
+    reply_text = (drafted or {}).get("reply_text", "").strip()
+    in_scope = bool((drafted or {}).get("in_scope")) and bool(reply_text)
+
+    if not in_scope and forced_rank_question:
+        # Deterministic fallback that never depends on the model cooperating
+        # — guarantees rank/seat questions are always answered, not escalated.
+        reply_text = (
+            "Thanks for asking! For your exact rank and category, please check our free LAWCET Phase 2 tools — "
+            "3-Year course: https://lawsticker-ai.com/lawcet-phase2-predictor.html and "
+            "5-Year course (BA/BBA/B.Com LLB): https://lawsticker-ai.com/lawcet-phase2-predictor-5y.html — "
+            "enter your rank and category there to see which colleges are realistic for you."
+        )
+        in_scope = True
+
+    if not in_scope:
         if bot_token and chat_id_config:
             send_telegram_to_all(bot_token, chat_id_config, escalate_msg[:4000])
         return
 
-    final_reply = (drafted["reply_text"].strip() + YT_REPLY_DISCLAIMER_EN)[:9000]  # YouTube's own comment length cap
+    final_reply = (reply_text + YT_REPLY_DISCLAIMER_EN)[:9000]  # YouTube's own comment length cap
 
     try:
         access_token = get_youtube_access_token()
@@ -5098,7 +5131,7 @@ def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_
                 f"✅ <b>AI auto-replied to a YouTube comment</b>\n"
                 f"🎬 {comment['video_title'] or 'Video'}\n"
                 f"👤 {comment['author']}: “{comment['text']}”\n"
-                f"🤖 Reply: “{drafted['reply_text'].strip()}”\n"
+                f"🤖 Reply: “{reply_text}”\n"
                 f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
             )
             send_telegram_to_all(bot_token, chat_id_config, confirm_msg[:4000])
