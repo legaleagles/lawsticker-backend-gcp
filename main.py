@@ -4980,6 +4980,55 @@ def fix_enrichment():
 
 YT_STATS_FILE = "youtube-stats.json"
 YT_CHANNEL_HANDLE = "lawstickerai"
+YT_SEEN_COMMENTS_FILE = "youtube-seen-comments.json"
+
+
+def fetch_youtube_new_comments(channel_id, yt_key, seen_ids, max_results=20):
+    # allThreadsRelatedToChannelId gives the most recent top-level comments
+    # across every video on the channel, newest first — exactly what we want
+    # to diff against what we've already notified about.
+    url = (
+        "https://www.googleapis.com/youtube/v3/commentThreads"
+        f"?part=snippet&allThreadsRelatedToChannelId={channel_id}"
+        f"&order=time&maxResults={max_results}&key={yt_key}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "lawsticker-ai-cron/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode())
+
+    items = data.get("items", [])
+    new_items = [it for it in items if it.get("id") not in seen_ids]
+    if not new_items:
+        return [], [it.get("id") for it in items]
+
+    # Batch-fetch video titles for whatever videos these new comments are on,
+    # one call instead of one per comment.
+    video_ids = sorted({it["snippet"]["videoId"] for it in new_items if it.get("snippet", {}).get("videoId")})
+    titles = {}
+    if video_ids:
+        vurl = (
+            "https://www.googleapis.com/youtube/v3/videos"
+            f"?part=snippet&id={','.join(video_ids)}&key={yt_key}"
+        )
+        vreq = urllib.request.Request(vurl, headers={"User-Agent": "lawsticker-ai-cron/1.0"})
+        with urllib.request.urlopen(vreq, timeout=15) as vresp:
+            vdata = json.loads(vresp.read().decode())
+        for v in vdata.get("items", []):
+            titles[v["id"]] = v.get("snippet", {}).get("title", "")
+
+    comments = []
+    for it in new_items:
+        sn = it["snippet"]["topLevelComment"]["snippet"]
+        vid = it["snippet"]["videoId"]
+        comments.append({
+            "id": it.get("id"),
+            "video_id": vid,
+            "video_title": titles.get(vid, ""),
+            "author": sn.get("authorDisplayName", "Someone"),
+            "text": sn.get("textDisplay", ""),
+        })
+    all_current_ids = [it.get("id") for it in items]
+    return comments, all_current_ids
 
 
 @app.route('/api/youtube-stats', methods=['GET'])
@@ -5002,6 +5051,7 @@ def youtube_stats():
         if not items:
             return jsonify({"ok": False, "error": "Channel not found for handle.", "raw": data}), 500
 
+        channel_id = items[0].get("id")
         stats = items[0]["statistics"]
         output = {
             "subscriber_count": int(stats.get("subscriberCount", 0)),
@@ -5016,7 +5066,44 @@ def youtube_stats():
             sha = None
         github_put(YT_STATS_FILE, site_token, output, sha, "Daily YouTube stats refresh", timeout=8)
 
-        return jsonify({"ok": True, "stats": output})
+        # New-comment watcher — piggybacks on this same call so it runs on
+        # whatever schedule this endpoint is already cron-triggered on,
+        # rather than needing a second cron job.
+        new_comments = []
+        try:
+            seen_data, seen_sha = github_get(YT_SEEN_COMMENTS_FILE, site_token, timeout=8)
+            first_run = seen_data is None
+            seen_ids = set((seen_data or {}).get("seen_ids", []))
+            if channel_id:
+                new_comments, all_current_ids = fetch_youtube_new_comments(channel_id, yt_key, seen_ids)
+                if first_run:
+                    # Nothing to notify about yet — just seed the seen list so
+                    # only comments posted AFTER this point get a Telegram alert.
+                    new_comments = []
+                # Keep the seen list bounded — union of what we just saw with
+                # the existing list, capped to the most recent 500 ids.
+                merged = list(dict.fromkeys(all_current_ids + list(seen_ids)))[:500]
+                github_put(YT_SEEN_COMMENTS_FILE, site_token, {"seen_ids": merged}, seen_sha,
+                           "Update seen YouTube comment ids", timeout=8)
+
+            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
+            if new_comments and bot_token and chat_id_config:
+                # Oldest-first so the Telegram feed reads chronologically.
+                for c in reversed(new_comments):
+                    msg = (
+                        f"💬 <b>New YouTube comment</b>\n"
+                        f"🎬 {c['video_title'] or 'Video'}\n"
+                        f"👤 {c['author']}\n"
+                        f"“{c['text']}”\n"
+                        f"👥 Subscribers: {output['subscriber_count']:,}\n"
+                        f"https://youtube.com/watch?v={c['video_id']}&lc={c['id']}"
+                    )
+                    send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
+        except Exception:
+            pass
+
+        return jsonify({"ok": True, "stats": output, "new_comments": len(new_comments)})
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
