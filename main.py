@@ -5475,6 +5475,19 @@ TENDER_ANOMALY_SCHEMA = {
     "type": "object",
     "properties": {
         "tender_summary": {"type": "string", "description": "2-3 sentence neutral summary of what this tender is for, issuing body, and estimated value"},
+        "plain_language_brief": {
+            "type": "object",
+            "properties": {
+                "what_is_being_bought": {"type": "string", "description": "1-3 plain sentences, no legal jargon, explaining what's actually being procured - as if explaining to someone with no procurement background"},
+                "who_can_apply": {"type": "string", "description": "Plain-language summary of who is eligible to bid - the key eligibility conditions in ordinary words, not the legal clause language"},
+                "how_much_money": {"type": "string", "description": "Plain-language summary of the money involved - what it costs, what deposits/guarantees a bidder needs to put up, in simple terms"},
+                "important_dates_plain": {"type": "string", "description": "Plain-language summary of when things happen - when to apply by, when it'll be decided - in ordinary sentence form, not a legal date table"},
+                "how_winner_is_chosen": {"type": "string", "description": "Plain-language explanation of how the winning bidder gets selected (e.g. lowest price wins, or price plus technical score, etc.)"},
+                "what_to_watch_for": {"type": "string", "description": "1-3 plain sentences translating the most important flagged concerns (if any) into ordinary language a non-lawyer would understand - what should someone reading this tender feel cautious about, without legal jargon. Empty string if nothing notable was flagged."},
+            },
+            "required": ["what_is_being_bought", "who_can_apply", "how_much_money", "important_dates_plain", "how_winner_is_chosen", "what_to_watch_for"],
+            "description": "A companion plain-English brief of the ENTIRE tender written for an ordinary citizen with no legal/procurement background - government tenders are written in dense legal/bureaucratic language that's genuinely hard to follow even for educated readers. This section exists specifically to make the tender itself understandable, separate from the anomaly-hunting sections below.",
+        },
         "nature_of_work": {"type": "string", "description": "1-2 sentences precisely describing what is actually being procured (goods/services/works, quantities, scope) - this frames whether a market-value comparison even makes sense for this tender type"},
         "key_dates": {
             "type": "array",
@@ -5528,7 +5541,7 @@ TENDER_ANOMALY_SCHEMA = {
         },
         "overall_assessment": {"type": "string", "description": "2-4 sentence honest overall read: does this tender show a genuine pattern of restrictive/tailored conditions, or does it look like a fairly standard tender with only minor/routine points - be calibrated, not alarmist. Many tenders have SOME restrictive clauses for legitimate reasons; only flag a real pattern as concerning."},
     },
-    "required": ["tender_summary", "nature_of_work", "key_dates", "bid_window_assessment", "financial_snapshot", "relaxation_clauses", "flags", "overall_assessment"],
+    "required": ["tender_summary", "plain_language_brief", "nature_of_work", "key_dates", "bid_window_assessment", "financial_snapshot", "relaxation_clauses", "flags", "overall_assessment"],
 }
 
 TENDER_ANOMALY_CHECKLIST = """Analyze this government/PSU tender document THOROUGHLY for clauses that could improperly restrict fair competition or enable a pre-decided outcome. This is for citizens preparing RTI applications and public-transparency scrutiny - be precise, evidence-based, calibrated, and exhaustive. These documents are typically drafted by competent people who cover most loose ends deliberately, but often leave a few genuine gaps or overly-favorable clauses buried among routine boilerplate - your job is to find those specific ones, not to pad the report with generic observations.
@@ -5537,17 +5550,19 @@ Do NOT flag routine, standard tender boilerplate as suspicious just because it e
 
 WORK THROUGH THESE DISTINCT ANALYSIS TASKS, ALL OF THEM:
 
-A. NATURE OF WORK: State precisely what's being procured. This determines whether "market value" comparisons even make sense — for physical commodities they often do, for specialized services/manpower/works they usually don't (use wage benchmarks, past contract rates, or scope-to-cost proportionality instead, not a generic "market rate" claim you can't actually verify).
+A. PLAIN-LANGUAGE BRIEF: Government tenders are written in dense legal/bureaucratic language that's genuinely hard to follow even for educated readers. Write a companion brief in ordinary, everyday language (no legal jargon, no clause numbers, no "hereinafter") explaining: what's being bought, who can apply, how much money is involved, when things happen, and how the winner gets picked. Someone with zero procurement background should be able to read this and actually understand what the tender says. If your other analysis below finds genuine concerns, also translate the single most important one into plain language here - not the full legal reasoning, just "here's what to watch out for" in simple words.
 
-B. KEY DATES: Extract EVERY milestone date/deadline printed (publication, document download, clarification window, bid submission start/end, technical bid opening, financial bid opening, any others). For each, note if genuinely notable - e.g. an unusually short gap to the next milestone for a tender this complex, a date left open-ended where it should be fixed, or an internal date inconsistency. List even normal dates with an empty concern - the reader needs the full timeline either way.
+B. NATURE OF WORK: State precisely what's being procured. This determines whether "market value" comparisons even make sense — for physical commodities they often do, for specialized services/manpower/works they usually don't (use wage benchmarks, past contract rates, or scope-to-cost proportionality instead, not a generic "market rate" claim you can't actually verify).
 
-C. BID WINDOW: Compute/estimate the total days between publication and bid submission deadline, and give an honest read on whether that's a reasonable window for the technical complexity and value involved - compare against what would normally be expected, don't just label it "short" without saying why.
+C. KEY DATES: Extract EVERY milestone date/deadline printed (publication, document download, clarification window, bid submission start/end, technical bid opening, financial bid opening, any others). For each, note if genuinely notable - e.g. an unusually short gap to the next milestone for a tender this complex, a date left open-ended where it should be fixed, or an internal date inconsistency. List even normal dates with an empty concern - the reader needs the full timeline either way.
 
-D. FINANCIAL SNAPSHOT: Pull the estimated tender value, EMD, performance security, and turnover threshold exactly as printed. Only flag a proportionality concern if there's a genuine mismatch between these figures relative to EACH OTHER and the stated scope - not a forced external market-price comparison for every tender type.
+D. BID WINDOW: Compute/estimate the total days between publication and bid submission deadline, and give an honest read on whether that's a reasonable window for the technical complexity and value involved - compare against what would normally be expected, don't just label it "short" without saying why.
 
-E. RELAXATION/DISCRETION CLAUSES - EXHAUSTIVE SCAN: Search the ENTIRE document specifically for every clause anywhere that gives the procuring authority power to relax, waive, deviate from, exercise discretion over, or overrule any stated eligibility/technical/financial/evaluation condition. These are the highest-value clauses for rigging since they let a committee bend rules selectively. List every single instance found, however small, not just one representative example - a document can have several scattered across different sections (eligibility, evaluation, contract terms) and all of them matter.
+E. FINANCIAL SNAPSHOT: Pull the estimated tender value, EMD, performance security, and turnover threshold exactly as printed. Only flag a proportionality concern if there's a genuine mismatch between these figures relative to EACH OTHER and the stated scope - not a forced external market-price comparison for every tender type.
 
-F. OTHER RESTRICTIVE/TAILORED CLAUSES: geographic/office-location restrictions narrower than needed, ownership requirements excluding viable business models, technical specs unusually narrow (specific brand/model with no genuine equivalent), turnover/experience thresholds disproportionate to contract value, tie-breaker mechanisms that lack objective merit criteria (e.g. pure lottery instead of a scored tiebreaker), or anything else genuinely anomalous.
+F. RELAXATION/DISCRETION CLAUSES - EXHAUSTIVE SCAN: Search the ENTIRE document specifically for every clause anywhere that gives the procuring authority power to relax, waive, deviate from, exercise discretion over, or overrule any stated eligibility/technical/financial/evaluation condition. These are the highest-value clauses for rigging since they let a committee bend rules selectively. List every single instance found, however small, not just one representative example - a document can have several scattered across different sections (eligibility, evaluation, contract terms) and all of them matter.
+
+G. OTHER RESTRICTIVE/TAILORED CLAUSES: geographic/office-location restrictions narrower than needed, ownership requirements excluding viable business models, technical specs unusually narrow (specific brand/model with no genuine equivalent), turnover/experience thresholds disproportionate to contract value, tie-breaker mechanisms that lack objective merit criteria (e.g. pure lottery instead of a scored tiebreaker), or anything else genuinely anomalous.
 
 For every genuine flagged issue, quote the EXACT clause (verbatim, with clause number), explain the specific structural concern, rate severity honestly, and where applicable draft one specific answerable RTI question. If you find few or no genuine issues in a section, say so plainly rather than forcing content to fill a quota - a clean tender should come back looking clean, and a thorough one should come back looking thorough."""
 
