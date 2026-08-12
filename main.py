@@ -5469,6 +5469,144 @@ def ga4_daily_digest():
 
 
 
+TENDER_SCRUTINY_LOG_FILE = "tender-scrutiny-log.json"
+
+TENDER_ANOMALY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tender_summary": {"type": "string", "description": "2-3 sentence neutral summary of what this tender is for, issuing body, and estimated value"},
+        "flags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "One of: Restrictive Eligibility, Discretionary/Vague Clause, Tailored Specification, Financial Structure Anomaly, Timeline/Transparency Gap, Turnover/Experience Mismatch, Other"},
+                    "clause_quote": {"type": "string", "description": "Short verbatim quote (under 30 words) of the exact clause text being flagged, with clause/section number if visible"},
+                    "concern": {"type": "string", "description": "1-3 sentences: specifically why this clause structurally narrows competition, enables favoritism, or reduces transparency - grounded in GFR 2017 / standard public procurement fairness principles, not vague suspicion"},
+                    "severity": {"type": "string", "description": "One of: High, Medium, Low - based on how directly this could exclude legitimate competitors or enable a pre-decided outcome"},
+                    "suggested_rti_question": {"type": "string", "description": "One specific, answerable RTI question a citizen could file to seek justification/data on this exact clause - not generic, tailored to this clause"},
+                },
+                "required": ["category", "clause_quote", "concern", "severity", "suggested_rti_question"],
+            },
+        },
+        "overall_assessment": {"type": "string", "description": "2-4 sentence honest overall read: does this tender show a genuine pattern of restrictive/tailored conditions, or does it look like a fairly standard tender with only minor/routine points - be calibrated, not alarmist. Many tenders have SOME restrictive clauses for legitimate reasons; only flag a real pattern as concerning."},
+    },
+    "required": ["tender_summary", "flags", "overall_assessment"],
+}
+
+TENDER_ANOMALY_CHECKLIST = """Analyze this government/PSU tender document for clauses that could improperly restrict fair competition or enable a pre-decided outcome. This is for citizens preparing RTI applications and public-transparency scrutiny - be precise, evidence-based, and calibrated. Do NOT flag routine, standard tender boilerplate as suspicious just because it exists; only flag clauses that are genuinely unusual, disproportionate, or specifically enabling of favoritism.
+
+Check specifically for these known red-flag patterns (drawn from GFR 2017 and standard public-procurement fairness principles), but also flag anything else genuinely anomalous you notice:
+
+1. RESTRICTIVE ELIGIBILITY: geographic/office-location restrictions narrower than needed for the work, ownership requirements (vs. access/arrangement) for capital assets that exclude viable business models, turnover/experience thresholds disproportionate to contract value, requirements that appear to match only one known vendor's profile.
+
+2. DISCRETIONARY/VAGUE CLAUSES: language letting the procuring body "relax any eligibility condition," vague renewal/extension criteria ("satisfactory performance" with no defined scoring), open-ended discretion over technical evaluation without objective criteria.
+
+3. TAILORED SPECIFICATIONS: technical specs unusually narrow (specific brand/model with no genuine equivalent, unusual combination of features that only one product/vendor has), requirements that seem to describe an existing vendor's exact current setup rather than the Board's actual functional need.
+
+4. FINANCIAL STRUCTURE ANOMALIES: unusual or lopsided BOQ/quantity weighting that could let a bidder game the L1 formula, EMD/security amounts disproportionate to contract value (either direction), payment terms unusually favorable/unfavorable.
+
+5. TIMELINE/TRANSPARENCY GAPS: unusually short bid submission windows for the complexity of work, key dates left open-ended ("will be intimated") instead of fixed, unclear or missing pre-bid conference process for a technically complex tender.
+
+6. TURNOVER/EXPERIENCE MISMATCH: experience or turnover criteria that don't scale sensibly with the actual contract value or work complexity.
+
+For every genuine issue found, quote the EXACT clause (short, verbatim, with clause number), explain the specific structural concern, rate severity honestly, and draft one specific answerable RTI question. If you find few or no genuine issues, say so plainly in overall_assessment rather than forcing flags to fill a quota - a clean tender should come back looking clean."""
+
+
+def check_tender_scrutiny_password(provided):
+    real_password = os.environ.get("SCAM_MODERATOR_PASSWORD")
+    if not real_password:
+        return False
+    return provided == real_password
+
+
+@app.route('/api/tender-scrutiny', methods=['POST'])
+def tender_scrutiny():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+
+    pdf_base64 = body.get("pdf_base64")
+    tender_name = (body.get("tender_name") or "").strip()
+    if not pdf_base64:
+        return jsonify({"ok": False, "error": "pdf_base64 is required."}), 400
+
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration - missing GEMINI_API_KEY."}), 500
+
+    try:
+        pdf_bytes = base64.b64decode(pdf_base64)
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid PDF data."}), 400
+
+    text = try_extract_pdf_text(pdf_bytes)
+    try:
+        if text:
+            # Real text layer available - send as plain text, cheaper and
+            # more reliable than vision for a long text-heavy document.
+            prompt = TENDER_ANOMALY_CHECKLIST + "\n\nTENDER DOCUMENT TEXT:\n" + text[:100000]
+            result = call_gemini_structured(gemini_key, prompt, TENDER_ANOMALY_SCHEMA, max_tokens=4000, timeout=60)
+        else:
+            # No usable text layer (scanned tender) - fall back to Gemini
+            # vision reading the PDF directly.
+            payload = json.dumps({
+                "contents": [{"parts": [
+                    {"text": TENDER_ANOMALY_CHECKLIST},
+                    {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
+                ]}],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": TENDER_ANOMALY_SCHEMA,
+                    "maxOutputTokens": 4000,
+                },
+            }).encode()
+            req = urllib.request.Request(
+                f"{GEMINI_URL}?key={gemini_key}", data=payload,
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = json.loads(resp.read().decode())
+            result = json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Analysis failed: {str(e)[:300]}"}), 500
+
+    if not result:
+        return jsonify({"ok": False, "error": "Analysis returned no result - the document may be unreadable."}), 500
+
+    # Log privately (this page/data is never linked publicly) so the small
+    # invited group can see past analyses without re-uploading.
+    try:
+        site_token = os.environ.get("SITE_REPO_TOKEN")
+        log, sha = github_get(TENDER_SCRUTINY_LOG_FILE, site_token, timeout=8)
+        entries = (log or {}).get("entries", [])
+        entries.insert(0, {
+            "id": hashlib.sha256(f"{tender_name}{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:12],
+            "tender_name": tender_name or "Untitled tender",
+            "analyzed_at": datetime.now(timezone.utc).isoformat(),
+            "result": result,
+        })
+        entries = entries[:100]  # keep it bounded, this is a small private log
+        github_put(TENDER_SCRUTINY_LOG_FILE, site_token, {"entries": entries}, sha, "Tender scrutiny log update", timeout=10)
+    except Exception:
+        pass  # logging failure shouldn't block returning the analysis itself
+
+    return jsonify({"ok": True, "result": result})
+
+
+@app.route('/api/tender-scrutiny-history', methods=['POST'])
+def tender_scrutiny_history():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    log, _ = github_get(TENDER_SCRUTINY_LOG_FILE, site_token, timeout=8)
+    entries = (log or {}).get("entries", [])
+    # Small private log (capped at 100, only 2-3 users) - simplest to just
+    # return everything rather than a separate summary/detail split.
+    return jsonify({"ok": True, "entries": entries})
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
@@ -5479,6 +5617,7 @@ def health():
         "/api/telegram-webhook", "/api/daily-social-card",
         "/api/daily-sc-digest", "/api/sc-digest-data",
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
+        "/api/tender-scrutiny", "/api/tender-scrutiny-history",
     ]})
 
 
