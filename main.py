@@ -5475,12 +5475,49 @@ TENDER_ANOMALY_SCHEMA = {
     "type": "object",
     "properties": {
         "tender_summary": {"type": "string", "description": "2-3 sentence neutral summary of what this tender is for, issuing body, and estimated value"},
+        "nature_of_work": {"type": "string", "description": "1-2 sentences precisely describing what is actually being procured (goods/services/works, quantities, scope) - this frames whether a market-value comparison even makes sense for this tender type"},
+        "key_dates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "e.g. Date of Publication, Bid Submission Start, Bid Submission End, Technical Bid Opening, Financial Bid Opening, Clarification End"},
+                    "value": {"type": "string", "description": "The exact date/time as printed, or 'Not specified / will be intimated later' if genuinely open-ended"},
+                    "concern": {"type": "string", "description": "Empty string if this date is normal. Non-empty ONLY if genuinely notable - e.g. unusually short window to the next date, or left open-ended when it should be fixed, or an internal inconsistency (a later stage dated before an earlier one)."},
+                },
+                "required": ["label", "value", "concern"],
+            },
+        },
+        "bid_window_assessment": {"type": "string", "description": "1-2 sentences: how many days between publication and bid submission deadline, and whether that's reasonable for a tender of this technical complexity and value - compare to typical practice (e.g. GFR 2017 generally expects a minimum reasonable response window scaled to complexity), don't just assert a number is 'short' without saying what it should reasonably be instead"},
+        "financial_snapshot": {
+            "type": "object",
+            "properties": {
+                "estimated_value": {"type": "string", "description": "The tender's own stated estimated cost/value, as printed, or 'Not specified' if absent"},
+                "emd_amount": {"type": "string", "description": "EMD/Bid Security amount as printed, or 'Not specified/exempted'"},
+                "performance_security": {"type": "string", "description": "Performance security amount/percentage as printed"},
+                "turnover_threshold": {"type": "string", "description": "Minimum turnover eligibility requirement as printed"},
+                "proportionality_note": {"type": "string", "description": "1-3 sentences ONLY if there's a genuine disproportion worth noting - e.g. turnover threshold set unusually high or low relative to estimated value, or EMD disproportionate to contract value. Do NOT force a generic market-rate comparison for every tender type - for services/manpower/works where 'market value' isn't a simple lookup, say so plainly instead of inventing a comparison, and focus instead on whether the FINANCIAL FIGURES ARE INTERNALLY PROPORTIONATE to each other and to the stated scope of work."},
+            },
+            "required": ["estimated_value", "emd_amount", "performance_security", "turnover_threshold", "proportionality_note"],
+        },
+        "relaxation_clauses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "clause_quote": {"type": "string", "description": "Exact verbatim quote of a clause that grants the procuring authority discretion to relax, waive, or deviate from stated eligibility/technical/financial conditions, with clause number if visible"},
+                    "concern": {"type": "string", "description": "1-2 sentences on why this specific discretion clause is a risk vector - who benefits if criteria are relaxed selectively, and what it undermines about the tender's stated fairness"},
+                },
+                "required": ["clause_quote", "concern"],
+            },
+            "description": "A DEDICATED, thorough scan specifically for every clause anywhere in the document that gives the procuring authority power to relax, waive, deviate from, or use discretion over any stated condition - these are the single most exploitable clauses in tender rigging and deserve exhaustive listing, not just one example. List EVERY instance found, not just the most obvious one.",
+        },
         "flags": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "category": {"type": "string", "description": "One of: Restrictive Eligibility, Discretionary/Vague Clause, Tailored Specification, Financial Structure Anomaly, Timeline/Transparency Gap, Turnover/Experience Mismatch, Other"},
+                    "category": {"type": "string", "description": "One of: Restrictive Eligibility, Tailored Specification, Financial Structure Anomaly, Turnover/Experience Mismatch, Other (Discretionary clauses go in relaxation_clauses instead, dates go in key_dates instead - do not duplicate here)"},
                     "clause_quote": {"type": "string", "description": "Short verbatim quote (under 30 words) of the exact clause text being flagged, with clause/section number if visible"},
                     "concern": {"type": "string", "description": "1-3 sentences: specifically why this clause structurally narrows competition, enables favoritism, or reduces transparency - grounded in GFR 2017 / standard public procurement fairness principles, not vague suspicion"},
                     "severity": {"type": "string", "description": "One of: High, Medium, Low - based on how directly this could exclude legitimate competitors or enable a pre-decided outcome"},
@@ -5491,26 +5528,28 @@ TENDER_ANOMALY_SCHEMA = {
         },
         "overall_assessment": {"type": "string", "description": "2-4 sentence honest overall read: does this tender show a genuine pattern of restrictive/tailored conditions, or does it look like a fairly standard tender with only minor/routine points - be calibrated, not alarmist. Many tenders have SOME restrictive clauses for legitimate reasons; only flag a real pattern as concerning."},
     },
-    "required": ["tender_summary", "flags", "overall_assessment"],
+    "required": ["tender_summary", "nature_of_work", "key_dates", "bid_window_assessment", "financial_snapshot", "relaxation_clauses", "flags", "overall_assessment"],
 }
 
-TENDER_ANOMALY_CHECKLIST = """Analyze this government/PSU tender document for clauses that could improperly restrict fair competition or enable a pre-decided outcome. This is for citizens preparing RTI applications and public-transparency scrutiny - be precise, evidence-based, and calibrated. Do NOT flag routine, standard tender boilerplate as suspicious just because it exists; only flag clauses that are genuinely unusual, disproportionate, or specifically enabling of favoritism.
+TENDER_ANOMALY_CHECKLIST = """Analyze this government/PSU tender document THOROUGHLY for clauses that could improperly restrict fair competition or enable a pre-decided outcome. This is for citizens preparing RTI applications and public-transparency scrutiny - be precise, evidence-based, calibrated, and exhaustive. These documents are typically drafted by competent people who cover most loose ends deliberately, but often leave a few genuine gaps or overly-favorable clauses buried among routine boilerplate - your job is to find those specific ones, not to pad the report with generic observations.
 
-Check specifically for these known red-flag patterns (drawn from GFR 2017 and standard public-procurement fairness principles), but also flag anything else genuinely anomalous you notice:
+Do NOT flag routine, standard tender boilerplate as suspicious just because it exists; only flag clauses that are genuinely unusual, disproportionate, or specifically enabling of favoritism.
 
-1. RESTRICTIVE ELIGIBILITY: geographic/office-location restrictions narrower than needed for the work, ownership requirements (vs. access/arrangement) for capital assets that exclude viable business models, turnover/experience thresholds disproportionate to contract value, requirements that appear to match only one known vendor's profile.
+WORK THROUGH THESE DISTINCT ANALYSIS TASKS, ALL OF THEM:
 
-2. DISCRETIONARY/VAGUE CLAUSES: language letting the procuring body "relax any eligibility condition," vague renewal/extension criteria ("satisfactory performance" with no defined scoring), open-ended discretion over technical evaluation without objective criteria.
+A. NATURE OF WORK: State precisely what's being procured. This determines whether "market value" comparisons even make sense — for physical commodities they often do, for specialized services/manpower/works they usually don't (use wage benchmarks, past contract rates, or scope-to-cost proportionality instead, not a generic "market rate" claim you can't actually verify).
 
-3. TAILORED SPECIFICATIONS: technical specs unusually narrow (specific brand/model with no genuine equivalent, unusual combination of features that only one product/vendor has), requirements that seem to describe an existing vendor's exact current setup rather than the Board's actual functional need.
+B. KEY DATES: Extract EVERY milestone date/deadline printed (publication, document download, clarification window, bid submission start/end, technical bid opening, financial bid opening, any others). For each, note if genuinely notable - e.g. an unusually short gap to the next milestone for a tender this complex, a date left open-ended where it should be fixed, or an internal date inconsistency. List even normal dates with an empty concern - the reader needs the full timeline either way.
 
-4. FINANCIAL STRUCTURE ANOMALIES: unusual or lopsided BOQ/quantity weighting that could let a bidder game the L1 formula, EMD/security amounts disproportionate to contract value (either direction), payment terms unusually favorable/unfavorable.
+C. BID WINDOW: Compute/estimate the total days between publication and bid submission deadline, and give an honest read on whether that's a reasonable window for the technical complexity and value involved - compare against what would normally be expected, don't just label it "short" without saying why.
 
-5. TIMELINE/TRANSPARENCY GAPS: unusually short bid submission windows for the complexity of work, key dates left open-ended ("will be intimated") instead of fixed, unclear or missing pre-bid conference process for a technically complex tender.
+D. FINANCIAL SNAPSHOT: Pull the estimated tender value, EMD, performance security, and turnover threshold exactly as printed. Only flag a proportionality concern if there's a genuine mismatch between these figures relative to EACH OTHER and the stated scope - not a forced external market-price comparison for every tender type.
 
-6. TURNOVER/EXPERIENCE MISMATCH: experience or turnover criteria that don't scale sensibly with the actual contract value or work complexity.
+E. RELAXATION/DISCRETION CLAUSES - EXHAUSTIVE SCAN: Search the ENTIRE document specifically for every clause anywhere that gives the procuring authority power to relax, waive, deviate from, exercise discretion over, or overrule any stated eligibility/technical/financial/evaluation condition. These are the highest-value clauses for rigging since they let a committee bend rules selectively. List every single instance found, however small, not just one representative example - a document can have several scattered across different sections (eligibility, evaluation, contract terms) and all of them matter.
 
-For every genuine issue found, quote the EXACT clause (short, verbatim, with clause number), explain the specific structural concern, rate severity honestly, and draft one specific answerable RTI question. If you find few or no genuine issues, say so plainly in overall_assessment rather than forcing flags to fill a quota - a clean tender should come back looking clean."""
+F. OTHER RESTRICTIVE/TAILORED CLAUSES: geographic/office-location restrictions narrower than needed, ownership requirements excluding viable business models, technical specs unusually narrow (specific brand/model with no genuine equivalent), turnover/experience thresholds disproportionate to contract value, tie-breaker mechanisms that lack objective merit criteria (e.g. pure lottery instead of a scored tiebreaker), or anything else genuinely anomalous.
+
+For every genuine flagged issue, quote the EXACT clause (verbatim, with clause number), explain the specific structural concern, rate severity honestly, and where applicable draft one specific answerable RTI question. If you find few or no genuine issues in a section, say so plainly rather than forcing content to fill a quota - a clean tender should come back looking clean, and a thorough one should come back looking thorough."""
 
 
 def check_tender_scrutiny_password(provided):
@@ -5545,8 +5584,8 @@ def tender_scrutiny():
         if text:
             # Real text layer available - send as plain text, cheaper and
             # more reliable than vision for a long text-heavy document.
-            prompt = TENDER_ANOMALY_CHECKLIST + "\n\nTENDER DOCUMENT TEXT:\n" + text[:100000]
-            result = call_gemini_structured(gemini_key, prompt, TENDER_ANOMALY_SCHEMA, max_tokens=4000, timeout=60)
+            prompt = TENDER_ANOMALY_CHECKLIST + "\n\nTENDER DOCUMENT TEXT:\n" + text[:180000]
+            result = call_gemini_structured(gemini_key, prompt, TENDER_ANOMALY_SCHEMA, max_tokens=8000, timeout=90)
         else:
             # No usable text layer (scanned tender) - fall back to Gemini
             # vision reading the PDF directly.
@@ -5558,7 +5597,7 @@ def tender_scrutiny():
                 "generationConfig": {
                     "responseMimeType": "application/json",
                     "responseSchema": TENDER_ANOMALY_SCHEMA,
-                    "maxOutputTokens": 4000,
+                    "maxOutputTokens": 8000,
                 },
             }).encode()
             req = urllib.request.Request(
