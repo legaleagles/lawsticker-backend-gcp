@@ -5662,6 +5662,51 @@ def tender_scrutiny_history():
     return jsonify({"ok": True, "entries": entries})
 
 
+GOLD_CHECK_TRANSLATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "translations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Translated strings, in the SAME order as the input list, one-to-one",
+        },
+    },
+    "required": ["translations"],
+}
+
+
+@app.route('/api/translate-gold-checks', methods=['POST'])
+def translate_gold_checks():
+    body = request.get_json(force=True, silent=True) or {}
+    texts = body.get("texts") or []
+    target_lang = body.get("target_lang", "")
+    if not texts or target_lang not in ("te", "hi"):
+        return jsonify({"ok": False, "error": "texts and a valid target_lang ('te' or 'hi') are required."}), 400
+
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration - missing GEMINI_API_KEY."}), 500
+
+    lang_name = "Telugu" if target_lang == "te" else "Hindi"
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
+    prompt = f"""Translate each of these {len(texts)} numbered English sentences into natural, everyday {lang_name} - the way a person would actually explain gold bill numbers to a family member, not stiff formal/literary {lang_name}.
+
+CRITICAL: Keep every number, ₹ amount, percentage, gram/carat weight, and date EXACTLY as in the English original (do not convert or translate numerals themselves - only translate the surrounding words). Keep it natural to read, same overall meaning and tone as the English.
+
+{numbered}
+
+Return exactly {len(texts)} translations in the same order, one per input sentence."""
+
+    try:
+        result = call_gemini_structured(gemini_key, prompt, GOLD_CHECK_TRANSLATE_SCHEMA, max_tokens=3000, timeout=30)
+        translations = (result or {}).get("translations", [])
+        if len(translations) != len(texts):
+            return jsonify({"ok": False, "error": "Translation count mismatch."}), 500
+        return jsonify({"ok": True, "translations": translations})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
@@ -5672,7 +5717,7 @@ def health():
         "/api/telegram-webhook", "/api/daily-social-card",
         "/api/daily-sc-digest", "/api/sc-digest-data",
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
-        "/api/tender-scrutiny", "/api/tender-scrutiny-history",
+        "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
     ]})
 
 
