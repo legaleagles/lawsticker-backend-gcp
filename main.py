@@ -5229,12 +5229,18 @@ def youtube_stats():
         # whatever schedule this endpoint is already cron-triggered on,
         # rather than needing a second cron job.
         new_comments = []
+        debug_info = {}
         try:
             seen_data, seen_sha = github_get(YT_SEEN_COMMENTS_FILE, site_token, timeout=8)
             first_run = seen_data is None
             seen_ids = set((seen_data or {}).get("seen_ids", []))
+            debug_info["channel_id"] = channel_id
+            debug_info["first_run"] = first_run
+            debug_info["seen_ids_count_before"] = len(seen_ids)
             if channel_id:
                 new_comments, all_current_ids = fetch_youtube_new_comments(channel_id, yt_key, seen_ids)
+                debug_info["api_returned_ids"] = all_current_ids[:5]
+                debug_info["api_returned_count"] = len(all_current_ids)
                 if first_run:
                     # Nothing to notify about yet — just seed the seen list so
                     # only comments posted AFTER this point get a Telegram alert.
@@ -5253,8 +5259,10 @@ def youtube_stats():
                 for c in reversed(new_comments):
                     handle_new_youtube_comment(c, site_token, gemini_key, bot_token, chat_id_config, output['subscriber_count'])
         except Exception as e:
-            if request.args.get("debug"):
-                return jsonify({"ok": True, "stats": output, "new_comments": 0, "debug_error": f"{type(e).__name__}: {e}"})
+            debug_info["error"] = f"{type(e).__name__}: {e}"
+
+        if request.args.get("debug"):
+            return jsonify({"ok": True, "stats": output, "new_comments": len(new_comments), "debug": debug_info})
 
         return jsonify({"ok": True, "stats": output, "new_comments": len(new_comments)})
 
