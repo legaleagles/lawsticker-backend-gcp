@@ -1765,6 +1765,7 @@ BILL_EXTRACT_SCHEMA = {
     "properties": {
         "shop_name": {"type": "STRING"},
         "bill_date": {"type": "STRING"},
+        "document_type": {"type": "STRING", "description": "Either 'estimate' (a pre-purchase quote/estimate slip, not yet paid, often has words like Estimate, Quotation, or no GST invoice number) or 'receipt' (a final tax invoice / paid receipt for a completed purchase, usually has a GST invoice number, 'Paid'/payment mode, or 'Tax Invoice' printed). Best guess based on what's actually printed - default to 'estimate' only if genuinely ambiguous."},
         "printed_gold_rate_per_gram": {"type": "NUMBER"},
         "item_description": {"type": "STRING"},
         "item_purity_karat": {"type": "STRING"},
@@ -1799,7 +1800,7 @@ BILL_EXTRACT_SCHEMA = {
 
 
 def build_bill_extract_prompt():
-    return """This is a photographed jewellery shop estimate/bill — the format varies completely by shop, read whatever is actually printed, don't assume a fixed layout.
+    return """This is a photographed jewellery shop document — could be a pre-purchase ESTIMATE/quotation, or a final paid RECEIPT/tax invoice for a purchase that's already been completed. The format varies completely by shop, read whatever is actually printed, don't assume a fixed layout. Identify which type of document this is (see document_type field) - look for cues like "Tax Invoice", a GST invoice number, "Paid"/payment mode/amount received, versus "Estimate"/"Quotation" or no invoice numbering.
 
 Extract every field you can genuinely find on this specific bill. If a field isn't present on this bill, leave it as 0 or an empty string — never invent or guess a number that isn't actually printed.
 
@@ -2038,6 +2039,8 @@ def check_gold_bill():
                 continue
         printed_rate = extracted.get("printed_gold_rate_per_gram") or 0
         purity = (extracted.get("item_purity_karat") or "22").replace("K", "").replace("k", "").strip()
+        doc_type = (extracted.get("document_type") or "estimate").strip().lower()
+        is_receipt = doc_type == "receipt"
         real_prices, matched_city = fetch_real_gold_rate(city)
         if real_prices:
             today_gold_rate = {
@@ -2055,6 +2058,17 @@ def check_gold_bill():
                     else:
                         checks.append({"status": "warn", "title": "Gold rate differs from today's real published rate",
                                         "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g, a difference of ₹{abs(round(diff))}/g."})
+                elif is_receipt:
+                    # A completed, already-paid purchase from an earlier date.
+                    # Comparing to TODAY's rate can't actually tell them if
+                    # they were overcharged on the day they bought (gold
+                    # moves daily and we don't have that historical rate) —
+                    # so this must read as neutral context, not an action
+                    # item, and must never suggest "before you pay" since
+                    # there's nothing left to negotiate.
+                    date_label = parsed_bill_date.strftime("%d %b %Y") if parsed_bill_date else (bill_date_str or "an earlier date")
+                    checks.append({"status": "info", "title": "This was a completed purchase — for your records",
+                                    "detail": f"This receipt is dated {date_label}, with a printed rate of ₹{printed_rate}/g. Today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g, just for reference — gold prices move daily, so this difference alone doesn't tell you whether the rate was fair on the day you actually bought it. If something here looks off to you, the other checks below (arithmetic, making-charge method, stone pricing) are what's worth focusing on."})
                 else:
                     date_label = parsed_bill_date.strftime("%d %b %Y") if parsed_bill_date else (bill_date_str or "an earlier date")
                     direction = "higher" if diff < 0 else "lower" if diff > 0 else "the same as"
