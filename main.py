@@ -5135,11 +5135,18 @@ def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_
                 f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
             )
             send_telegram_to_all(bot_token, chat_id_config, confirm_msg[:4000])
-    except Exception:
+    except Exception as e:
         # Posting failed for any reason (auth, rate limit, etc.) - fall back
-        # to escalation rather than silently losing the comment.
+        # to escalation rather than silently losing the comment, but include
+        # the real error so it's visible without a separate debug round-trip.
+        err_detail = str(e)
+        try:
+            if hasattr(e, "read"):
+                err_detail = e.read().decode()[:500]
+        except Exception:
+            pass
         if bot_token and chat_id_config:
-            send_telegram_to_all(bot_token, chat_id_config, escalate_msg[:4000])
+            send_telegram_to_all(bot_token, chat_id_config, (escalate_msg + f"\n⚠️ Post error: {type(e).__name__}: {err_detail}")[:4000])
 
 
 def fetch_youtube_new_comments(channel_id, yt_key, seen_ids, max_results=20):
