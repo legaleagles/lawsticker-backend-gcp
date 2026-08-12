@@ -5475,6 +5475,7 @@ TENDER_ANOMALY_SCHEMA = {
     "type": "object",
     "properties": {
         "tender_summary": {"type": "string", "description": "2-3 sentence neutral summary of what this tender is for, issuing body, and estimated value"},
+        "suggested_title": {"type": "string", "description": "A short (5-9 word) descriptive title for this tender, e.g. 'GHMC GPS Vehicle Tracking Tender 2026' - issuing body + subject + year if known. Used as the default filename/label, should be filesystem-safe-ish (no slashes or special punctuation)."},
         "plain_language_brief": {
             "type": "object",
             "properties": {
@@ -5541,7 +5542,7 @@ TENDER_ANOMALY_SCHEMA = {
         },
         "overall_assessment": {"type": "string", "description": "2-4 sentence honest overall read: does this tender show a genuine pattern of restrictive/tailored conditions, or does it look like a fairly standard tender with only minor/routine points - be calibrated, not alarmist. Many tenders have SOME restrictive clauses for legitimate reasons; only flag a real pattern as concerning."},
     },
-    "required": ["tender_summary", "plain_language_brief", "nature_of_work", "key_dates", "bid_window_assessment", "financial_snapshot", "relaxation_clauses", "flags", "overall_assessment"],
+    "required": ["tender_summary", "suggested_title", "plain_language_brief", "nature_of_work", "key_dates", "bid_window_assessment", "financial_snapshot", "relaxation_clauses", "flags", "overall_assessment"],
 }
 
 TENDER_ANOMALY_CHECKLIST = """Analyze this government/PSU tender document THOROUGHLY for clauses that could improperly restrict fair competition or enable a pre-decided outcome. This is for citizens preparing RTI applications and public-transparency scrutiny - be precise, evidence-based, calibrated, and exhaustive. These documents are typically drafted by competent people who cover most loose ends deliberately, but often leave a few genuine gaps or overly-favorable clauses buried among routine boilerplate - your job is to find those specific ones, not to pad the report with generic observations.
@@ -5636,7 +5637,7 @@ def tender_scrutiny():
         entries = (log or {}).get("entries", [])
         entries.insert(0, {
             "id": hashlib.sha256(f"{tender_name}{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:12],
-            "tender_name": tender_name or "Untitled tender",
+            "tender_name": tender_name or (result.get("suggested_title") if result else None) or "Untitled tender",
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "result": result,
         })
