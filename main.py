@@ -4982,6 +4982,132 @@ YT_STATS_FILE = "youtube-stats.json"
 YT_CHANNEL_HANDLE = "lawstickerai"
 YT_SEEN_COMMENTS_FILE = "youtube-seen-comments.json"
 
+YT_REPLY_DISCLAIMER_EN = "\n\n🤖 This is an AI-generated reply from LawSticker AI based on our website's LAWCET Phase 2 tools and site content."
+
+LAWCET_PHASE2_TOOLS_CONTEXT = """LAWCET PHASE 2 TOOLS AVAILABLE ON THE SITE (use these when a comment asks about rank/seat/cutoff/vacancy chances for LAWCET Phase 2 counseling):
+- 3-Year Degree Course (3-YDC, regular LLB) Rank Predictor: https://lawsticker-ai.com/lawcet-phase2-predictor.html
+- 3-Year Degree Course (3-YDC) Seat Vacancy List: https://lawsticker-ai.com/lawcet-phase2-vacancy.html
+- 5-Year Degree Course (5-YDC — BA LLB / BBA LLB / B.Com LLB) Rank Predictor: https://lawsticker-ai.com/lawcet-phase2-predictor-5y.html
+- 5-Year Degree Course (5-YDC) Seat Vacancy List: https://lawsticker-ai.com/lawcet-phase2-vacancy-5y.html
+
+CRITICAL: You must NEVER personally predict, calculate, or state whether a specific rank/category/gender/zone combination will get a seat, and NEVER invent a cutoff or vacancy number in your reply — you do not have live access to run the actual tool's logic. Instead, identify whether the commenter is asking about the 3-year or 5-year course (look for course-type hints; if unclear, mention both), and point them to the matching tool link above so they can check their own exact rank/category. This is the ONLY correct way to handle rank/seat questions."""
+
+YT_REPLY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "in_scope": {"type": "boolean", "description": "true only if this can be answered confidently and accurately using ONLY the site content/tools provided below - false for anything else (personal legal advice outside LAWCET, unrelated topics, insults, spam, unclear questions, or anything the provided content doesn't clearly cover)"},
+        "reply_text": {"type": "string", "description": "The reply text if in_scope is true, in the SAME language mix/style as the comment (e.g. if the comment mixes Telugu and English, reply the same natural code-mixed way). Empty string if in_scope is false."},
+    },
+    "required": ["in_scope", "reply_text"],
+}
+
+
+def build_youtube_reply_prompt(comment_text, video_title, entries):
+    context_blocks = []
+    for e in entries:
+        title = e["title"].get("en", "")
+        body = e["body"].get("en", "")
+        context_blocks.append(f"[Source: {e['source_page']}]\nTitle: {title}\nContent: {body}")
+    context = "\n\n".join(context_blocks)
+
+    return f"""You are "Durga Bro", replying to a YouTube comment on LawSticker AI's channel (@lawstickerai) as an AI assistant, on the video "{video_title}".
+
+STRICT RULE — this is stricter than the site's normal Ask AI assistant: you may ONLY answer using the SITE CONTENT below and the LAWCET Phase 2 tool links. You must NOT use your own general knowledge of Indian law, LAWCET, or anything else, even if you're confident it's correct. If the site content and tool links don't clearly cover what's being asked, set in_scope to false — do not guess, do not fill gaps with general knowledge.
+
+{LAWCET_PHASE2_TOOLS_CONTEXT}
+
+SITE CONTENT:
+{context if context else "(no matching site content found)"}
+
+Style guidance for the reply itself:
+- Match the commenter's own language style — many commenters mix Telugu and English in one sentence (Tenglish); if they wrote that way, reply that way naturally, not in stiff formal English.
+- Keep it short and warm, like a real reply to a comment, not an essay - 2-4 sentences.
+- If pointing to a tool link, say so naturally as part of the sentence.
+- Do not repeat the disclaimer yourself, it will be added separately.
+
+COMMENT TO REPLY TO: "{comment_text}"
+
+Decide: can this be answered confidently from ONLY what's provided above? If yes, in_scope=true and write the reply. If the topic isn't covered, is a personal legal question needing individual judgement, or is off-topic/spam/unclear, in_scope=false with an empty reply_text."""
+
+
+def get_youtube_access_token():
+    client_id = os.environ.get("YOUTUBE_OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("YOUTUBE_OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("YOUTUBE_OAUTH_REFRESH_TOKEN")
+    if not (client_id and client_secret and refresh_token):
+        return None
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode()
+    req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        result = json.loads(resp.read().decode())
+    return result.get("access_token")
+
+
+def post_youtube_reply(access_token, parent_comment_id, reply_text):
+    url = "https://www.googleapis.com/youtube/v3/comments?part=snippet"
+    body = json.dumps({"snippet": {"parentId": parent_comment_id, "textOriginal": reply_text}}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_id_config, subscriber_count):
+    # Draft a reply strictly from site content; escalate to Telegram instead
+    # of posting anything if it's not confidently covered.
+    try:
+        kb, _ = github_get(KB_FILE, site_token, timeout=6)
+        entries = (kb or {}).get("entries", [])
+        relevant_entries = filter_relevant_entries_askai(comment["text"], entries, topic="lawcet")
+        prompt = build_youtube_reply_prompt(comment["text"], comment["video_title"], relevant_entries)
+        drafted = call_gemini_structured(gemini_key, prompt, YT_REPLY_SCHEMA, max_tokens=500, timeout=20)
+    except Exception:
+        drafted = None
+
+    escalate_msg = (
+        f"💬 <b>YouTube comment needs your reply</b>\n"
+        f"🎬 {comment['video_title'] or 'Video'}\n"
+        f"👤 {comment['author']}\n"
+        f"“{comment['text']}”\n"
+        f"👥 Subscribers: {subscriber_count:,}\n"
+        f"AI could not confidently answer this from site content — please reply personally.\n"
+        f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
+    )
+
+    if not drafted or not drafted.get("in_scope") or not (drafted.get("reply_text") or "").strip():
+        if bot_token and chat_id_config:
+            send_telegram_to_all(bot_token, chat_id_config, escalate_msg[:4000])
+        return
+
+    final_reply = (drafted["reply_text"].strip() + YT_REPLY_DISCLAIMER_EN)[:9000]  # YouTube's own comment length cap
+
+    try:
+        access_token = get_youtube_access_token()
+        if not access_token:
+            raise Exception("YouTube OAuth not configured")
+        post_youtube_reply(access_token, comment["id"], final_reply)
+        if bot_token and chat_id_config:
+            confirm_msg = (
+                f"✅ <b>AI auto-replied to a YouTube comment</b>\n"
+                f"🎬 {comment['video_title'] or 'Video'}\n"
+                f"👤 {comment['author']}: “{comment['text']}”\n"
+                f"🤖 Reply: “{drafted['reply_text'].strip()}”\n"
+                f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
+            )
+            send_telegram_to_all(bot_token, chat_id_config, confirm_msg[:4000])
+    except Exception:
+        # Posting failed for any reason (auth, rate limit, etc.) - fall back
+        # to escalation rather than silently losing the comment.
+        if bot_token and chat_id_config:
+            send_telegram_to_all(bot_token, chat_id_config, escalate_msg[:4000])
+
 
 def fetch_youtube_new_comments(channel_id, yt_key, seen_ids, max_results=20):
     # allThreadsRelatedToChannelId gives the most recent top-level comments
@@ -5088,18 +5214,11 @@ def youtube_stats():
 
             bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
             chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
-            if new_comments and bot_token and chat_id_config:
-                # Oldest-first so the Telegram feed reads chronologically.
+            gemini_key = os.environ.get("GEMINI_API_KEY")
+            if new_comments:
+                # Oldest-first so replies/escalations land in a sensible order.
                 for c in reversed(new_comments):
-                    msg = (
-                        f"💬 <b>New YouTube comment</b>\n"
-                        f"🎬 {c['video_title'] or 'Video'}\n"
-                        f"👤 {c['author']}\n"
-                        f"“{c['text']}”\n"
-                        f"👥 Subscribers: {output['subscriber_count']:,}\n"
-                        f"https://youtube.com/watch?v={c['video_id']}&lc={c['id']}"
-                    )
-                    send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
+                    handle_new_youtube_comment(c, site_token, gemini_key, bot_token, chat_id_config, output['subscriber_count'])
         except Exception:
             pass
 
