@@ -5252,8 +5252,9 @@ def youtube_stats():
                 # Oldest-first so replies/escalations land in a sensible order.
                 for c in reversed(new_comments):
                     handle_new_youtube_comment(c, site_token, gemini_key, bot_token, chat_id_config, output['subscriber_count'])
-        except Exception:
-            pass
+        except Exception as e:
+            if request.args.get("debug"):
+                return jsonify({"ok": True, "stats": output, "new_comments": 0, "debug_error": f"{type(e).__name__}: {e}"})
 
         return jsonify({"ok": True, "stats": output, "new_comments": len(new_comments)})
 
