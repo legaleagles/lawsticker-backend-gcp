@@ -5017,6 +5017,7 @@ def fix_enrichment():
 YT_STATS_FILE = "youtube-stats.json"
 YT_CHANNEL_HANDLE = "lawstickerai"
 YT_SEEN_COMMENTS_FILE = "youtube-seen-comments.json"
+YT_FLAGGED_FILE = "youtube-flagged-comments.json"
 
 YT_REPLY_DISCLAIMER_EN = "\n\n🤖 This is an AI-generated reply from LawSticker AI based on our website's LAWCET Phase 2 tools and site content."
 
@@ -5147,16 +5148,48 @@ def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_
     # need a human's eyes even if a factual answer also got posted.
     needs_attention = bool((drafted or {}).get("needs_human_attention"))
     attention_reason = (drafted or {}).get("human_attention_reason", "").strip()
-    if needs_attention and bot_token and chat_id_config:
-        alert_msg = (
-            f"🚩 <b>Comment may need your attention</b>\n"
-            f"🎬 {comment['video_title'] or 'Video'}\n"
-            f"👤 {comment['author']}\n"
-            f"“{comment['text']}”\n"
-            f"Reason: {attention_reason or 'flagged as negative/complaint by AI'}\n"
-            f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
-        )
-        send_telegram_to_all(bot_token, chat_id_config, alert_msg[:4000])
+    if needs_attention:
+        # Store in a private review queue (not just a fire-and-forget
+        # Telegram ping) so it can actually be opened, read in context, and
+        # replied to later from the moderation page — Telegram alone is easy
+        # to lose in a busy chat.
+        try:
+            queue, q_sha = github_get(YT_FLAGGED_FILE, site_token, timeout=8)
+            queue_entries = (queue or {}).get("entries", [])
+            queue_entries.insert(0, {
+                "id": comment["id"],
+                "video_id": comment["video_id"],
+                "video_title": comment.get("video_title", ""),
+                "author": comment["author"],
+                "text": comment["text"],
+                "reason": attention_reason or "flagged as negative/complaint by AI",
+                "suggested_reply": (drafted or {}).get("reply_text", "").strip(),
+                "flagged_at": datetime.now(timezone.utc).isoformat(),
+                "status": "pending",
+            })
+            queue_entries = queue_entries[:200]  # bounded - old handled items age out
+            github_put(YT_FLAGGED_FILE, site_token, {"entries": queue_entries}, q_sha, "Flag YouTube comment for review", timeout=10)
+        except Exception:
+            pass
+
+        if bot_token and chat_id_config:
+            alert_msg = (
+                f"🚩 <b>Comment flagged for review</b>\n"
+                f"🎬 {comment['video_title'] or 'Video'}\n"
+                f"👤 {comment['author']}\n"
+                f"“{comment['text']}”\n"
+                f"Reason: {attention_reason or 'flagged as negative/complaint by AI'}\n"
+                f"Added to the review queue — /admin/youtube-comments.html\n"
+                f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
+            )
+            send_telegram_to_all(bot_token, chat_id_config, alert_msg[:4000])
+
+        # Flagged comments are held for a human to review and respond to
+        # from the moderation queue — never auto-posted, even if the AI also
+        # drafted a confident answer. A bad-comment situation deserves a
+        # person's judgement on tone and whether/how to respond, not a bot
+        # deciding on its own.
+        return
 
     escalate_msg = (
         f"💬 <b>YouTube comment needs your reply</b>\n"
@@ -5638,6 +5671,61 @@ G. OTHER RESTRICTIVE/TAILORED CLAUSES: geographic/office-location restrictions n
 For every genuine flagged issue, quote the EXACT clause (verbatim, with clause number), explain the specific structural concern, rate severity honestly, and where applicable draft one specific answerable RTI question. If you find few or no genuine issues in a section, say so plainly rather than forcing content to fill a quota - a clean tender should come back looking clean, and a thorough one should come back looking thorough."""
 
 
+@app.route('/api/youtube-flagged-comments', methods=['POST'])
+def youtube_flagged_comments():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    queue, _ = github_get(YT_FLAGGED_FILE, site_token, timeout=8)
+    entries = (queue or {}).get("entries", [])
+    return jsonify({"ok": True, "entries": entries})
+
+
+@app.route('/api/youtube-flagged-comment-action', methods=['POST'])
+def youtube_flagged_comment_action():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+
+    comment_id = body.get("id")
+    action = body.get("action")  # 'reply' or 'dismiss'
+    reply_text = (body.get("reply_text") or "").strip()
+    if not comment_id or action not in ("reply", "dismiss"):
+        return jsonify({"ok": False, "error": "id and a valid action are required."}), 400
+
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    queue, q_sha = github_get(YT_FLAGGED_FILE, site_token, timeout=8)
+    entries = (queue or {}).get("entries", [])
+    target = next((e for e in entries if e.get("id") == comment_id), None)
+    if not target:
+        return jsonify({"ok": False, "error": "Comment not found in queue (may have already been handled)."}), 404
+
+    if action == "reply":
+        if not reply_text:
+            return jsonify({"ok": False, "error": "reply_text is required for the reply action."}), 400
+        try:
+            access_token = get_youtube_access_token()
+            if not access_token:
+                raise Exception("YouTube OAuth not configured")
+            final_reply = (reply_text + YT_REPLY_DISCLAIMER_EN)[:9000] if "🤖" not in reply_text else reply_text[:9000]
+            post_youtube_reply(access_token, comment_id, final_reply)
+        except Exception as e:
+            err_detail = str(e)
+            try:
+                if hasattr(e, "read"):
+                    err_detail = e.read().decode()[:500]
+            except Exception:
+                pass
+            return jsonify({"ok": False, "error": f"Posting failed: {type(e).__name__}: {err_detail}"}), 500
+
+    # Either the reply posted successfully, or this was a dismiss — remove
+    # from the queue either way.
+    entries = [e for e in entries if e.get("id") != comment_id]
+    github_put(YT_FLAGGED_FILE, site_token, {"entries": entries}, q_sha, f"YouTube flagged comment {action}: {comment_id}", timeout=10)
+    return jsonify({"ok": True})
+
+
 def check_tender_scrutiny_password(provided):
     real_password = os.environ.get("SCAM_MODERATOR_PASSWORD")
     if not real_password:
@@ -5799,6 +5887,7 @@ def health():
         "/api/daily-sc-digest", "/api/sc-digest-data",
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
         "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
+        "/api/youtube-flagged-comments", "/api/youtube-flagged-comment-action",
     ]})
 
 
