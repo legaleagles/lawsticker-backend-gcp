@@ -1889,6 +1889,7 @@ def check_gold_bill():
     image_base64 = body.get("image_base64")
     image_mime = body.get("image_mime", "image/jpeg")
     city = body.get("city", "hyderabad")
+    lang = body.get("lang", "en")
     if not image_base64:
         return jsonify({"ok": False, "error": "image_base64 is required."}), 400
 
@@ -2076,6 +2077,26 @@ def check_gold_bill():
                                     "detail": f"This estimate was dated {date_label}, quoting ₹{printed_rate}/g. Today's real {purity}K rate for {matched_city.title()} is ₹{real_rate}/g — {direction} than what's on this old bill. Gold rates change daily, so if you're about to finalize a purchase or negotiate using this estimate, confirm today's rate with the shop first rather than relying on this printed figure."})
     except Exception:
         pass
+
+    # Translate at the source, once, before returning — simpler and far more
+    # reliable than re-translating client-side after the fact: the person
+    # picks their language BEFORE tapping "Check This Bill", so the backend
+    # can just generate the whole report in that language in one request/
+    # response instead of a fragile multi-step client-side re-render dance.
+    if lang in ("te", "hi") and checks:
+        texts = []
+        for c in checks:
+            texts.append(c["title"])
+            texts.append(c["detail"])
+        if making_charge_range and making_charge_range.get("note"):
+            texts.append(making_charge_range["note"])
+        translated = translate_texts_for_gold_bill(texts, lang, gemini_key)
+        if translated != texts:
+            for i, c in enumerate(checks):
+                c["title"] = translated[i * 2]
+                c["detail"] = translated[i * 2 + 1]
+            if making_charge_range and making_charge_range.get("note"):
+                making_charge_range["note"] = translated[-1]
 
     return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table, "making_charge_range": making_charge_range, "today_gold_rate": today_gold_rate})
 
@@ -5689,18 +5710,14 @@ GOLD_CHECK_TRANSLATE_SCHEMA = {
 }
 
 
-@app.route('/api/translate-gold-checks', methods=['POST'])
-def translate_gold_checks():
-    body = request.get_json(force=True, silent=True) or {}
-    texts = body.get("texts") or []
-    target_lang = body.get("target_lang", "")
-    if not texts or target_lang not in ("te", "hi"):
-        return jsonify({"ok": False, "error": "texts and a valid target_lang ('te' or 'hi') are required."}), 400
-
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_key:
-        return jsonify({"ok": False, "error": "Server misconfiguration - missing GEMINI_API_KEY."}), 500
-
+def translate_texts_for_gold_bill(texts, target_lang, gemini_key):
+    # Shared by check_gold_bill (translate-at-source, the primary path now)
+    # and the standalone /api/translate-gold-checks endpoint kept below for
+    # any old cached client calls. Returns the original texts unchanged on
+    # any failure rather than raising, so a translation hiccup never blocks
+    # the actual bill analysis from being returned.
+    if not texts or target_lang not in ("te", "hi") or not gemini_key:
+        return texts
     lang_name = "Telugu" if target_lang == "te" else "Hindi"
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
     prompt = f"""Translate each of these {len(texts)} numbered English sentences into natural, everyday {lang_name} - the way a person would actually explain gold bill numbers to a family member, not stiff formal/literary {lang_name}.
@@ -5710,15 +5727,30 @@ CRITICAL: Keep every number, ₹ amount, percentage, gram/carat weight, and date
 {numbered}
 
 Return exactly {len(texts)} translations in the same order, one per input sentence."""
-
     try:
         result = call_gemini_structured(gemini_key, prompt, GOLD_CHECK_TRANSLATE_SCHEMA, max_tokens=3000, timeout=30)
         translations = (result or {}).get("translations", [])
-        if len(translations) != len(texts):
-            return jsonify({"ok": False, "error": "Translation count mismatch."}), 500
-        return jsonify({"ok": True, "translations": translations})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+        if len(translations) == len(texts):
+            return translations
+    except Exception:
+        pass
+    return texts
+
+
+@app.route('/api/translate-gold-checks', methods=['POST'])
+def translate_gold_checks():
+    body = request.get_json(force=True, silent=True) or {}
+    texts = body.get("texts") or []
+    target_lang = body.get("target_lang", "")
+    if not texts or target_lang not in ("te", "hi"):
+        return jsonify({"ok": False, "error": "texts and a valid target_lang ('te' or 'hi') are required."}), 400
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration - missing GEMINI_API_KEY."}), 500
+    translations = translate_texts_for_gold_bill(texts, target_lang, gemini_key)
+    if translations == texts:
+        return jsonify({"ok": False, "error": "Translation failed."}), 500
+    return jsonify({"ok": True, "translations": translations})
 
 
 @app.route('/', methods=['GET'])
