@@ -653,6 +653,7 @@ TOPIC_PAGE_MAP = {
     "llbsubjects": ["subjects"],
     "calculators": ["limitation-calc", "court-fee-calc", "chit-fund-calc", "electricity-calc",
                      "gold-loan-calc", "gold-calculator", "eligibility-calculator"],
+    "gold": ["gold-bill-checker", "gold-calculator", "gold-loan-calc"],
 }
 
 TOPIC_LABELS = {
@@ -5032,27 +5033,42 @@ YT_REPLY_SCHEMA = {
     "properties": {
         "in_scope": {"type": "boolean", "description": "true only if this can be answered confidently and accurately using ONLY the site content/tools provided below - false for anything else (personal legal advice outside LAWCET, unrelated topics, insults, spam, unclear questions, or anything the provided content doesn't clearly cover)"},
         "reply_text": {"type": "string", "description": "The reply text if in_scope is true, in the SAME language mix/style as the comment (e.g. if the comment mixes Telugu and English, reply the same natural code-mixed way). Empty string if in_scope is false."},
+        "needs_human_attention": {"type": "boolean", "description": "true if this comment is negative, a complaint, reports something as broken/not working, expresses frustration or distrust, is rude/abusive, or accuses the channel/tool/site of being a scam or wrong - regardless of whether in_scope is also true and gets auto-replied. A calm factual question is NOT this, even if unanswerable. false for ordinary neutral/positive comments."},
+        "human_attention_reason": {"type": "string", "description": "One short phrase explaining why, if needs_human_attention is true - e.g. 'says the tool gave a wrong result', 'rude/abusive tone', 'accuses site of being a scam'. Empty string otherwise."},
     },
-    "required": ["in_scope", "reply_text"],
+    "required": ["in_scope", "reply_text", "needs_human_attention", "human_attention_reason"],
 }
 
 
-def build_youtube_reply_prompt(comment_text, video_title, entries):
+def infer_youtube_reply_topic(video_title):
+    # Which slice of the KB to bias toward for this specific video - keeps
+    # answers grounded in the actually-relevant tool instead of always
+    # leaning on LAWCET content regardless of what video the comment is on.
+    title_l = (video_title or "").lower()
+    if any(k in title_l for k in ("gold", "jewel", "jewellery")):
+        return "gold"
+    if any(k in title_l for k in ("lawcet", "phase 2", "seat predictor", "counseling", "counselling")):
+        return "lawcet"
+    return None  # search the whole KB rather than biasing toward the wrong topic
+
+
+def build_youtube_reply_prompt(comment_text, video_title, entries, include_lawcet_tools):
     context_blocks = []
     for e in entries:
         title = e["title"].get("en", "")
         body = e["body"].get("en", "")
         context_blocks.append(f"[Source: {e['source_page']}]\nTitle: {title}\nContent: {body}")
     context = "\n\n".join(context_blocks)
+    tools_section = f"\n{LAWCET_PHASE2_TOOLS_CONTEXT}\n" if include_lawcet_tools else ""
 
     return f"""You are "Durga Bro", replying to a YouTube comment on LawSticker AI's channel (@lawstickerai) as an AI assistant, on the video "{video_title}".
 
-STRICT RULE — this is stricter than the site's normal Ask AI assistant: you may ONLY answer using the SITE CONTENT below and the LAWCET Phase 2 tool links. You must NOT use your own general knowledge of Indian law, LAWCET, or anything else, even if you're confident it's correct. If the site content and tool links don't clearly cover what's being asked, set in_scope to false — do not guess, do not fill gaps with general knowledge.
-
-{LAWCET_PHASE2_TOOLS_CONTEXT}
-
+STRICT RULE — this is stricter than the site's normal Ask AI assistant: you may ONLY answer using the SITE CONTENT below{" and the LAWCET Phase 2 tool links" if include_lawcet_tools else ""}. You must NOT use your own general knowledge, even if you're confident it's correct. If the site content{" and tool links" if include_lawcet_tools else ""} don't clearly cover what's being asked, set in_scope to false — do not guess, do not fill gaps with general knowledge.
+{tools_section}
 SITE CONTENT:
 {context if context else "(no matching site content found)"}
+
+Also assess needs_human_attention separately from in_scope — a comment can be answerable AND still need a human to see it (e.g. someone politely asking a question but also mentioning the tool gave a wrong result, or a rude comment that happens to be answerable). Flag anything negative, frustrated, distrustful, rude, or reporting the tool/site as broken or a scam.
 
 Style guidance for the reply itself:
 - Match the commenter's own language style — many commenters mix Telugu and English in one sentence (Tenglish); if they wrote that way, reply that way naturally, not in stiff formal English.
@@ -5114,16 +5130,33 @@ def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_
     # Draft a reply strictly from site content; escalate to Telegram instead
     # of posting anything if it's not confidently covered.
     forced_rank_question = is_rank_seat_question(comment["text"])
+    topic = infer_youtube_reply_topic(comment.get("video_title", ""))
     try:
         kb, _ = github_get(KB_FILE, site_token, timeout=6)
         entries = (kb or {}).get("entries", [])
-        relevant_entries = filter_relevant_entries_askai(comment["text"], entries, topic="lawcet")
-        prompt = build_youtube_reply_prompt(comment["text"], comment["video_title"], relevant_entries)
+        relevant_entries = filter_relevant_entries_askai(comment["text"], entries, topic=topic)
+        prompt = build_youtube_reply_prompt(comment["text"], comment["video_title"], relevant_entries, include_lawcet_tools=(topic in (None, "lawcet")))
         if forced_rank_question:
             prompt += "\n\nIMPORTANT: This comment has already been detected as a rank/seat/category question by our system. You MUST set in_scope=true and answer it using the LAWCET PHASE 2 TOOLS rule above (identify 3-year vs 5-year course, point to the matching tool link) — do not set in_scope=false for this comment under any circumstance."
         drafted = call_gemini_structured(gemini_key, prompt, YT_REPLY_SCHEMA, max_tokens=500, timeout=20)
     except Exception:
         drafted = None
+
+    # Bad/negative/complaint comments always get a Telegram alert, regardless
+    # of whether the AI could also confidently auto-reply to them — these
+    # need a human's eyes even if a factual answer also got posted.
+    needs_attention = bool((drafted or {}).get("needs_human_attention"))
+    attention_reason = (drafted or {}).get("human_attention_reason", "").strip()
+    if needs_attention and bot_token and chat_id_config:
+        alert_msg = (
+            f"🚩 <b>Comment may need your attention</b>\n"
+            f"🎬 {comment['video_title'] or 'Video'}\n"
+            f"👤 {comment['author']}\n"
+            f"“{comment['text']}”\n"
+            f"Reason: {attention_reason or 'flagged as negative/complaint by AI'}\n"
+            f"https://youtube.com/watch?v={comment['video_id']}&lc={comment['id']}"
+        )
+        send_telegram_to_all(bot_token, chat_id_config, alert_msg[:4000])
 
     escalate_msg = (
         f"💬 <b>YouTube comment needs your reply</b>\n"
@@ -5150,7 +5183,9 @@ def handle_new_youtube_comment(comment, site_token, gemini_key, bot_token, chat_
         in_scope = True
 
     if not in_scope:
-        if bot_token and chat_id_config:
+        # Don't send a second "needs your reply" escalation if we already
+        # sent a "may need your attention" alert for the same comment.
+        if not needs_attention and bot_token and chat_id_config:
             send_telegram_to_all(bot_token, chat_id_config, escalate_msg[:4000])
         return
 
