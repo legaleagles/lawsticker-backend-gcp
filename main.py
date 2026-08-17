@@ -5833,10 +5833,27 @@ GHMC_SEEN_TENDERS_FILE = "ghmc-seen-tenders.json"
 
 
 def fetch_ghmc_tenders_page():
-    req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": "lawsticker-ai-cron/1.0"})
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        html = resp.read().decode("utf-8", errors="ignore")
-    return html
+    # Cloud Run containers sometimes fail DNS resolution when they try an
+    # IPv6 lookup first and there's no outbound IPv6 route, even though
+    # IPv4 works fine — this produces exactly the "Temporary failure in
+    # name resolution" error seen in testing. Force IPv4-only resolution
+    # for this call (scoped to just this function, restored immediately
+    # after) before assuming it's something more exotic like GHMC blocking
+    # cloud-provider IP ranges.
+    import socket
+    original_getaddrinfo = socket.getaddrinfo
+
+    def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4_only_getaddrinfo
+    try:
+        req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        return html
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
 
 
 def parse_ghmc_tender_rows(html):
