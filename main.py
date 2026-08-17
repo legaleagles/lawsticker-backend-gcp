@@ -5832,15 +5832,80 @@ GHMC_TENDERS_PAGE = "https://www.ghmc.gov.in/Tenderspage.aspx"
 GHMC_SEEN_TENDERS_FILE = "ghmc-seen-tenders.json"
 
 
+def _resolve_via_doh(hostname):
+    # DNS-over-HTTPS - resolves via a normal HTTPS request (port 443) instead
+    # of a native OS-level DNS lookup (UDP port 53). Retries with plain
+    # IPv4-forced native resolution didn't help and failed identically both
+    # times, which rules out "just transient" - since Gemini/GitHub/Telegram
+    # (all resolved natively) work fine from this same container, general
+    # DNS isn't broken; this looks specific to less-common domains like
+    # ghmc.gov.in. A plausible cause: outbound UDP:53 gets filtered in some
+    # Cloud Run VPC/network configs while HTTPS (443) doesn't. Using Google's
+    # own DoH endpoint sidesteps that entirely.
+    doh_req = urllib.request.Request(
+        f"https://dns.google/resolve?name={hostname}&type=A",
+        headers={"Accept": "application/dns-json"},
+    )
+    with urllib.request.urlopen(doh_req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+    answers = [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
+    if not answers:
+        raise Exception(f"DoH resolution returned no A record for {hostname}")
+    return answers[0]
+
+
+def _fetch_via_resolved_ip(url, user_agent, timeout=25):
+    # Connects directly to the DoH-resolved IP over TLS, sending the correct
+    # Host header / SNI so the server still sees a normal request for the
+    # right hostname - this is what lets us skip the container's own (here,
+    # apparently unreliable) hostname lookup entirely for this one call.
+    import ssl
+    import socket as sock_mod
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname
+    ip = _resolve_via_doh(hostname)
+    port = parsed.port or 443
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    raw_sock = sock_mod.create_connection((ip, port), timeout=timeout)
+    ctx = ssl.create_default_context()
+    ssl_sock = ctx.wrap_socket(raw_sock, server_hostname=hostname)
+    try:
+        request_lines = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            f"User-Agent: {user_agent}\r\n"
+            f"Accept: text/html\r\n"
+            f"Connection: close\r\n\r\n"
+        )
+        ssl_sock.sendall(request_lines.encode())
+        response = b""
+        while True:
+            chunk = ssl_sock.recv(8192)
+            if not chunk:
+                break
+            response += chunk
+    finally:
+        ssl_sock.close()
+
+    header_end = response.find(b"\r\n\r\n")
+    if header_end == -1:
+        raise Exception("Malformed HTTP response from GHMC (no header/body split found)")
+    status_line = response[:response.find(b"\r\n")].decode(errors="ignore")
+    body = response[header_end + 4:]
+    if " 200 " not in status_line:
+        raise Exception(f"Unexpected HTTP status fetching GHMC page: {status_line.strip()}")
+    return body.decode("utf-8", errors="ignore")
+
+
 def fetch_ghmc_tenders_page():
-    # "Temporary failure in name resolution" is a DNS lookup failure that
-    # happens BEFORE any connection attempt reaches GHMC's servers at all —
-    # so this isn't GHMC blocking us, it's the container's own DNS resolver
-    # failing on this particular lookup. The error's own wording says
-    # "temporary", and this class of container DNS hiccup often clears
-    # within a few seconds — so retry with a short backoff before giving up,
-    # rather than failing on the very first attempt. IPv4-only resolution
-    # kept too since it doesn't hurt and rules out a second possible cause.
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+    # First try the normal path (fast, simple) with IPv4-forced native
+    # resolution and a short retry - covers the case where it really is just
+    # a transient blip this time.
     import socket
     import time
     original_getaddrinfo = socket.getaddrinfo
@@ -5851,18 +5916,24 @@ def fetch_ghmc_tenders_page():
     socket.getaddrinfo = _ipv4_only_getaddrinfo
     last_error = None
     try:
-        for attempt in range(4):
+        for attempt in range(2):
             try:
-                req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": user_agent})
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     return resp.read().decode("utf-8", errors="ignore")
             except Exception as e:
                 last_error = e
-                if attempt < 3:
-                    time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s backoff
-        raise last_error
+                if attempt == 0:
+                    time.sleep(2)
     finally:
         socket.getaddrinfo = original_getaddrinfo
+
+    # Native resolution failed twice - fall back to DNS-over-HTTPS + a raw
+    # direct-IP request, bypassing the container's own DNS lookup entirely.
+    try:
+        return _fetch_via_resolved_ip(GHMC_TENDERS_PAGE, user_agent)
+    except Exception as doh_error:
+        raise Exception(f"Both native resolution and DNS-over-HTTPS fallback failed. Native: {last_error}. DoH: {doh_error}")
 
 
 def parse_ghmc_tender_rows(html):
