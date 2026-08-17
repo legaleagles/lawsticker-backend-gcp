@@ -5881,11 +5881,23 @@ def _fetch_via_resolved_ip(url, user_agent, timeout=25):
     ctx = ssl.create_default_context()
     ssl_sock = ctx.wrap_socket(raw_sock, server_hostname=hostname)
     try:
+        # A 403 from the earlier attempt (minimal headers) suggests a WAF/
+        # bot-detection rule flagging the request as non-browser traffic.
+        # Send a fuller, ordinary-browser-like header set - real requests
+        # almost never arrive with just User-Agent and Accept alone.
         request_lines = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {hostname}\r\n"
             f"User-Agent: {user_agent}\r\n"
-            f"Accept: text/html\r\n"
+            f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\r\n"
+            f"Accept-Language: en-US,en;q=0.9\r\n"
+            f"Accept-Encoding: identity\r\n"
+            f"Upgrade-Insecure-Requests: 1\r\n"
+            f"Sec-Fetch-Dest: document\r\n"
+            f"Sec-Fetch-Mode: navigate\r\n"
+            f"Sec-Fetch-Site: none\r\n"
+            f"Sec-Fetch-User: ?1\r\n"
+            f"Cache-Control: no-cache\r\n"
             f"Connection: close\r\n\r\n"
         )
         ssl_sock.sendall(request_lines.encode())
