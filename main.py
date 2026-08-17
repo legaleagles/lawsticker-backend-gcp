@@ -5839,19 +5839,27 @@ def _resolve_via_doh(hostname):
     # times, which rules out "just transient" - since Gemini/GitHub/Telegram
     # (all resolved natively) work fine from this same container, general
     # DNS isn't broken; this looks specific to less-common domains like
-    # ghmc.gov.in. A plausible cause: outbound UDP:53 gets filtered in some
-    # Cloud Run VPC/network configs while HTTPS (443) doesn't. Using Google's
-    # own DoH endpoint sidesteps that entirely.
-    doh_req = urllib.request.Request(
-        f"https://dns.google/resolve?name={hostname}&type=A",
-        headers={"Accept": "application/dns-json"},
-    )
-    with urllib.request.urlopen(doh_req, timeout=10) as resp:
-        data = json.loads(resp.read().decode())
-    answers = [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
-    if not answers:
-        raise Exception(f"DoH resolution returned no A record for {hostname}")
-    return answers[0]
+    # ghmc.gov.in. Try Google's DoH first, then Cloudflare's as a second
+    # resolver - Google's DNSSEC-validating resolver returning zero records
+    # (seen in testing) can happen with older/misconfigured .gov.in DNSSEC
+    # setups that a non-validating resolver like Cloudflare's tolerates fine,
+    # which is likely why the site loads normally in an ordinary browser.
+    last_err = None
+    for doh_host in ("dns.google", "cloudflare-dns.com"):
+        try:
+            doh_req = urllib.request.Request(
+                f"https://{doh_host}/resolve?name={hostname}&type=A",
+                headers={"Accept": "application/dns-json"},
+            )
+            with urllib.request.urlopen(doh_req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            answers = [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
+            if answers:
+                return answers[0]
+            last_err = Exception(f"{doh_host} returned no A record")
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 
 def _fetch_via_resolved_ip(url, user_agent, timeout=25):
@@ -5989,6 +5997,17 @@ def ghmc_tender_watch():
     seen_ids = set((seen_data or {}).get("seen_ids", []))
 
     new_rows = [r for r in rows if r["id"] not in seen_ids]
+
+    # Scoped to Patancheru only for now, per explicit request - GHMC tender
+    # titles include the locality name inline (e.g. "...in Madinaguda, Ward
+    # No.237, Miyapur Division-48..."), so a straightforward keyword match
+    # on the work name is enough - no separate circle/zone lookup needed.
+    # Everything on the page still gets marked "seen" below regardless of
+    # this filter, so non-Patancheru tenders are correctly never re-checked,
+    # they're just never analyzed or alerted on.
+    AREA_KEYWORDS = ("patancheru", "pattancheru")
+    relevant_new_rows = [r for r in new_rows if any(k in r["work_name"].lower() for k in AREA_KEYWORDS)]
+
     analyzed = []
 
     # Cap how many we actually run the AI on per call, in case the page ever
@@ -5999,7 +6018,7 @@ def ghmc_tender_watch():
     MAX_PER_RUN = 5
 
     if not first_run:
-        for row in new_rows[:MAX_PER_RUN]:
+        for row in relevant_new_rows[:MAX_PER_RUN]:
             if not row["doc_url"]:
                 continue  # nothing to actually analyze without a document
             try:
@@ -6038,7 +6057,7 @@ def ghmc_tender_watch():
     except Exception:
         pass
 
-    return jsonify({"ok": True, "total_on_page": len(rows), "new_found": len(new_rows), "analyzed_this_run": len(analyzed), "first_run": first_run})
+    return jsonify({"ok": True, "total_on_page": len(rows), "new_found": len(new_rows), "new_matching_area": len(relevant_new_rows), "analyzed_this_run": len(analyzed), "first_run": first_run})
 
 
 GOLD_CHECK_TRANSLATE_SCHEMA = {
