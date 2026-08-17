@@ -5986,6 +5986,19 @@ def parse_ghmc_tender_rows(html):
     return rows
 
 
+@app.route('/api/ghmc-connectivity-test', methods=['GET'])
+def ghmc_connectivity_test():
+    # Tests ONLY whether this deployment's network can reach GHMC's site -
+    # no API keys, tokens, or other env vars needed at all, so this works
+    # immediately on a fresh test deployment with zero configuration.
+    try:
+        html = fetch_ghmc_tenders_page()
+        rows = parse_ghmc_tender_rows(html)
+        return jsonify({"ok": True, "reached_ghmc": True, "rows_found": len(rows)})
+    except Exception as e:
+        return jsonify({"ok": False, "reached_ghmc": False, "error": str(e)[:500]})
+
+
 @app.route('/api/ghmc-tender-watch', methods=['GET'])
 def ghmc_tender_watch():
     site_token = os.environ.get("SITE_REPO_TOKEN")
