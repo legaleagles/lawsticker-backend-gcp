@@ -5999,6 +5999,20 @@ def ghmc_connectivity_test():
         return jsonify({"ok": False, "reached_ghmc": False, "error": str(e)[:500]})
 
 
+@app.route('/api/ghmc-tenders-list', methods=['GET'])
+def ghmc_tenders_list():
+    # Public - GHMC's own tender listing is public data, this just returns
+    # what's currently on their page in a clean JSON shape (work name + PDF
+    # link) so any tender - not just Patancheru-matching ones - can be
+    # manually browsed/downloaded and fed into Tender Scrutiny by hand.
+    try:
+        html = fetch_ghmc_tenders_page()
+        rows = parse_ghmc_tender_rows(html)
+        return jsonify({"ok": True, "tenders": rows})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not fetch/parse GHMC tenders page: {str(e)[:300]}"}), 500
+
+
 @app.route('/api/ghmc-tender-watch', methods=['GET'])
 def ghmc_tender_watch():
     site_token = os.environ.get("SITE_REPO_TOKEN")
@@ -6060,16 +6074,24 @@ def ghmc_tender_watch():
 
                 if bot_token and chat_id_config:
                     high_severity = [f for f in result.get("flags", []) if f.get("severity") == "High"]
-                    has_relaxation = bool(result.get("relaxation_clauses"))
-                    if high_severity or has_relaxation:
-                        msg = (
-                            f"🚩 <b>New GHMC tender flagged</b>\n"
-                            f"{row['work_name'][:200]}\n"
-                            f"High-severity flags: {len(high_severity)} · Relaxation clauses: {len(result.get('relaxation_clauses', []))}\n"
-                            f"Full analysis: /admin/tender-scrutiny.html (see history)\n"
-                            f"Source: {row['doc_url']}"
-                        )
-                        send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
+                    relaxation_count = len(result.get("relaxation_clauses", []))
+                    # Notify on EVERY analyzed Patancheru tender, not just
+                    # flagged ones - the point of watching a specific area is
+                    # to know about all of it, not only the concerning ones.
+                    # Severity of the emoji/framing still signals at a glance
+                    # whether it's worth opening immediately or just FYI.
+                    if high_severity or relaxation_count:
+                        headline = "🚩 <b>New Patancheru tender — issues flagged</b>"
+                    else:
+                        headline = "📄 <b>New Patancheru tender</b>"
+                    msg = (
+                        f"{headline}\n"
+                        f"{row['work_name'][:200]}\n"
+                        f"High-severity flags: {len(high_severity)} · Relaxation clauses: {relaxation_count}\n"
+                        f"Full analysis: /admin/tender-scrutiny.html (see history)\n"
+                        f"Document: {row['doc_url']}"
+                    )
+                    send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
             except Exception:
                 continue  # one bad tender/PDF shouldn't stop the rest of the run
 
@@ -6153,7 +6175,7 @@ def health():
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
         "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
         "/api/youtube-flagged-comments", "/api/youtube-flagged-comment-action",
-        "/api/ghmc-tender-watch",
+        "/api/ghmc-tender-watch", "/api/ghmc-tenders-list", "/api/ghmc-connectivity-test",
     ]})
 
 
