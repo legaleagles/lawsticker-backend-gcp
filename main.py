@@ -5733,6 +5733,51 @@ def check_tender_scrutiny_password(provided):
     return provided == real_password
 
 
+def run_tender_anomaly_analysis(pdf_bytes, gemini_key):
+    # Shared analysis core - used both by the manual upload endpoint
+    # (/api/tender-scrutiny) and the automated GHMC daily watcher below, so
+    # there's exactly one place that runs the actual checklist.
+    text = try_extract_pdf_text(pdf_bytes)
+    if text:
+        prompt = TENDER_ANOMALY_CHECKLIST + "\n\nTENDER DOCUMENT TEXT:\n" + text[:180000]
+        return call_gemini_structured(gemini_key, prompt, TENDER_ANOMALY_SCHEMA, max_tokens=8000, timeout=90)
+    pdf_base64 = base64.b64encode(pdf_bytes).decode()
+    payload = json.dumps({
+        "contents": [{"parts": [
+            {"text": TENDER_ANOMALY_CHECKLIST},
+            {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
+        ]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": TENDER_ANOMALY_SCHEMA,
+            "maxOutputTokens": 8000,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_URL}?key={gemini_key}", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = json.loads(resp.read().decode())
+    return json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
+
+
+def log_tender_scrutiny_result(site_token, tender_name, result, source="manual"):
+    log, sha = github_get(TENDER_SCRUTINY_LOG_FILE, site_token, timeout=8)
+    entries = (log or {}).get("entries", [])
+    entry_id = hashlib.sha256(f"{tender_name}{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:12]
+    entries.insert(0, {
+        "id": entry_id,
+        "tender_name": tender_name or (result.get("suggested_title") if result else None) or "Untitled tender",
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "result": result,
+    })
+    entries = entries[:100]
+    github_put(TENDER_SCRUTINY_LOG_FILE, site_token, {"entries": entries}, sha, "Tender scrutiny log update", timeout=10)
+    return entry_id
+
+
 @app.route('/api/tender-scrutiny', methods=['POST'])
 def tender_scrutiny():
     body = request.get_json(force=True, silent=True) or {}
@@ -5753,54 +5798,17 @@ def tender_scrutiny():
     except Exception:
         return jsonify({"ok": False, "error": "Invalid PDF data."}), 400
 
-    text = try_extract_pdf_text(pdf_bytes)
     try:
-        if text:
-            # Real text layer available - send as plain text, cheaper and
-            # more reliable than vision for a long text-heavy document.
-            prompt = TENDER_ANOMALY_CHECKLIST + "\n\nTENDER DOCUMENT TEXT:\n" + text[:180000]
-            result = call_gemini_structured(gemini_key, prompt, TENDER_ANOMALY_SCHEMA, max_tokens=8000, timeout=90)
-        else:
-            # No usable text layer (scanned tender) - fall back to Gemini
-            # vision reading the PDF directly.
-            payload = json.dumps({
-                "contents": [{"parts": [
-                    {"text": TENDER_ANOMALY_CHECKLIST},
-                    {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}},
-                ]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": TENDER_ANOMALY_SCHEMA,
-                    "maxOutputTokens": 8000,
-                },
-            }).encode()
-            req = urllib.request.Request(
-                f"{GEMINI_URL}?key={gemini_key}", data=payload,
-                headers={"Content-Type": "application/json"}, method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                raw = json.loads(resp.read().decode())
-            result = json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
+        result = run_tender_anomaly_analysis(pdf_bytes, gemini_key)
     except Exception as e:
         return jsonify({"ok": False, "error": f"Analysis failed: {str(e)[:300]}"}), 500
 
     if not result:
         return jsonify({"ok": False, "error": "Analysis returned no result - the document may be unreadable."}), 500
 
-    # Log privately (this page/data is never linked publicly) so the small
-    # invited group can see past analyses without re-uploading.
     try:
         site_token = os.environ.get("SITE_REPO_TOKEN")
-        log, sha = github_get(TENDER_SCRUTINY_LOG_FILE, site_token, timeout=8)
-        entries = (log or {}).get("entries", [])
-        entries.insert(0, {
-            "id": hashlib.sha256(f"{tender_name}{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:12],
-            "tender_name": tender_name or (result.get("suggested_title") if result else None) or "Untitled tender",
-            "analyzed_at": datetime.now(timezone.utc).isoformat(),
-            "result": result,
-        })
-        entries = entries[:100]  # keep it bounded, this is a small private log
-        github_put(TENDER_SCRUTINY_LOG_FILE, site_token, {"entries": entries}, sha, "Tender scrutiny log update", timeout=10)
+        log_tender_scrutiny_result(site_token, tender_name, result, source="manual")
     except Exception:
         pass  # logging failure shouldn't block returning the analysis itself
 
@@ -5818,6 +5826,122 @@ def tender_scrutiny_history():
     # Small private log (capped at 100, only 2-3 users) - simplest to just
     # return everything rather than a separate summary/detail split.
     return jsonify({"ok": True, "entries": entries})
+
+
+GHMC_TENDERS_PAGE = "https://www.ghmc.gov.in/Tenderspage.aspx"
+GHMC_SEEN_TENDERS_FILE = "ghmc-seen-tenders.json"
+
+
+def fetch_ghmc_tenders_page():
+    req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": "lawsticker-ai-cron/1.0"})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        html = resp.read().decode("utf-8", errors="ignore")
+    return html
+
+
+def parse_ghmc_tender_rows(html):
+    # GHMC's tenders table is plain server-rendered HTML (not JS-rendered),
+    # each row has the work name as a link (usually to a PDF or detail page)
+    # alongside dates. Parsed with regex rather than a full HTML parser
+    # dependency, since the structure is a simple repeating <tr> table.
+    rows = []
+    row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.S | re.I)
+    link_pattern = re.compile(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.S | re.I)
+    cell_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.S | re.I)
+
+    for row_html in row_pattern.findall(html):
+        cells = cell_pattern.findall(row_html)
+        if len(cells) < 3:
+            continue
+        link_match = link_pattern.search(row_html)
+        work_name = re.sub(r'<[^>]+>', '', cells[1] if len(cells) > 1 else "").strip()
+        work_name = re.sub(r'\s+', ' ', work_name)
+        if not work_name or work_name.lower() in ("name of the work", "t.type"):
+            continue
+        doc_url = None
+        if link_match:
+            href = link_match.group(1).strip()
+            doc_url = href if href.startswith("http") else "https://www.ghmc.gov.in/" + href.lstrip("/")
+        # Use a stable hash of the work name as the id - GHMC's table has no
+        # explicit tender/reference number column exposed in the HTML.
+        tender_id = hashlib.sha256(work_name.encode()).hexdigest()[:16]
+        rows.append({"id": tender_id, "work_name": work_name, "doc_url": doc_url})
+    return rows
+
+
+@app.route('/api/ghmc-tender-watch', methods=['GET'])
+def ghmc_tender_watch():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
+    if not site_token or not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    try:
+        html = fetch_ghmc_tenders_page()
+        rows = parse_ghmc_tender_rows(html)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not fetch/parse GHMC tenders page: {str(e)[:300]}"}), 500
+
+    try:
+        seen_data, seen_sha = github_get(GHMC_SEEN_TENDERS_FILE, site_token, timeout=8)
+    except Exception:
+        seen_data, seen_sha = None, None
+    first_run = seen_data is None
+    seen_ids = set((seen_data or {}).get("seen_ids", []))
+
+    new_rows = [r for r in rows if r["id"] not in seen_ids]
+    analyzed = []
+
+    # Cap how many we actually run the AI on per call, in case the page ever
+    # returns a big batch (e.g. first run, or GHMC posts many at once) - the
+    # rest will simply be picked up as "new" on the next scheduled run since
+    # they stay unseen, rather than burning a huge amount of Gemini credit
+    # in one go. We're a startup - controlled, not unlimited, AI spend.
+    MAX_PER_RUN = 5
+
+    if not first_run:
+        for row in new_rows[:MAX_PER_RUN]:
+            if not row["doc_url"]:
+                continue  # nothing to actually analyze without a document
+            try:
+                doc_req = urllib.request.Request(row["doc_url"], headers={"User-Agent": "lawsticker-ai-cron/1.0"})
+                with urllib.request.urlopen(doc_req, timeout=25) as doc_resp:
+                    pdf_bytes = doc_resp.read()
+                if not pdf_bytes.startswith(b"%PDF"):
+                    continue  # link wasn't actually a PDF (e.g. a detail page instead)
+                result = run_tender_anomaly_analysis(pdf_bytes, gemini_key)
+                if not result:
+                    continue
+                entry_id = log_tender_scrutiny_result(site_token, row["work_name"], result, source="ghmc-auto")
+                analyzed.append({"work_name": row["work_name"], "entry_id": entry_id, "flags": len(result.get("flags", [])) + len(result.get("relaxation_clauses", []))})
+
+                if bot_token and chat_id_config:
+                    high_severity = [f for f in result.get("flags", []) if f.get("severity") == "High"]
+                    has_relaxation = bool(result.get("relaxation_clauses"))
+                    if high_severity or has_relaxation:
+                        msg = (
+                            f"🚩 <b>New GHMC tender flagged</b>\n"
+                            f"{row['work_name'][:200]}\n"
+                            f"High-severity flags: {len(high_severity)} · Relaxation clauses: {len(result.get('relaxation_clauses', []))}\n"
+                            f"Full analysis: /admin/tender-scrutiny.html (see history)\n"
+                            f"Source: {row['doc_url']}"
+                        )
+                        send_telegram_to_all(bot_token, chat_id_config, msg[:4000])
+            except Exception:
+                continue  # one bad tender/PDF shouldn't stop the rest of the run
+
+    # Mark everything we saw this run (whether analyzed or not) so we don't
+    # re-process it, and don't blow past a reasonable stored history size.
+    all_current_ids = [r["id"] for r in rows]
+    merged = list(dict.fromkeys(all_current_ids + list(seen_ids)))[:1000]
+    try:
+        github_put(GHMC_SEEN_TENDERS_FILE, site_token, {"seen_ids": merged}, seen_sha, "Update seen GHMC tender ids", timeout=10)
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "total_on_page": len(rows), "new_found": len(new_rows), "analyzed_this_run": len(analyzed), "first_run": first_run})
 
 
 GOLD_CHECK_TRANSLATE_SCHEMA = {
@@ -5888,6 +6012,7 @@ def health():
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
         "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
         "/api/youtube-flagged-comments", "/api/youtube-flagged-comment-action",
+        "/api/ghmc-tender-watch",
     ]})
 
 
