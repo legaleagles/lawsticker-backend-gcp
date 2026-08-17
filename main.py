@@ -6013,6 +6013,96 @@ def ghmc_tenders_list():
         return jsonify({"ok": False, "error": f"Could not fetch/parse GHMC tenders page: {str(e)[:300]}"}), 500
 
 
+def fetch_ghmc_doc_bytes(doc_url):
+    # Fetches an actual PDF linked from GHMC's tenders page. Reuses the same
+    # native-then-DoH fallback as fetch_ghmc_tenders_page(), since a PDF link
+    # on ghmc.gov.in hits the identical connectivity issues as the listing
+    # page itself - no reason to expect the binary fetch to be any more
+    # reliable than the HTML fetch was.
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    import socket
+    import time
+    original_getaddrinfo = socket.getaddrinfo
+
+    def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4_only_getaddrinfo
+    last_error = None
+    try:
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(doc_url, headers={"User-Agent": user_agent})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+                    data = resp.read()
+                    return data, content_type
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(2)
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+
+    try:
+        body_text = _fetch_via_resolved_ip(doc_url, user_agent)
+        # _fetch_via_resolved_ip decodes as utf-8 text, which corrupts binary
+        # PDF bytes - only safe to use for HTML pages. If native resolution
+        # failed for a doc_url, surface that plainly instead of returning
+        # corrupted bytes.
+        raise Exception("Native fetch failed and binary PDFs can't use the text-mode DoH fallback")
+    except Exception as doh_error:
+        raise Exception(f"Could not fetch document from GHMC. Native: {last_error}. Fallback: {doh_error}")
+
+
+@app.route('/api/ghmc-tender-scrutinize', methods=['POST'])
+def ghmc_tender_scrutinize():
+    # One-click path from the "Live GHMC Tenders" list straight to a full
+    # analysis - fetches the linked PDF server-side and runs it through the
+    # same run_tender_anomaly_analysis() used by the manual-upload endpoint,
+    # so results are identical either way. Only works for rows where GHMC
+    # gave a real fetchable PDF URL (isRealLink on the frontend) - GHMC's
+    # ASP.NET postback-only "Download" links (__doPostBack(...), not a real
+    # href) can't be fetched this way at all; those still need the manual
+    # browser-download-then-upload path.
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+
+    doc_url = (body.get("doc_url") or "").strip()
+    work_name = (body.get("work_name") or "").strip()
+    if not doc_url or not doc_url.startswith("http"):
+        return jsonify({"ok": False, "error": "A real doc_url is required - this tender only has a GHMC postback link, which can't be fetched directly. Use the manual download-then-upload flow instead."}), 400
+
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration - missing GEMINI_API_KEY."}), 500
+
+    try:
+        pdf_bytes, content_type = fetch_ghmc_doc_bytes(doc_url)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not fetch the tender document from GHMC: {str(e)[:300]}"}), 502
+
+    if pdf_bytes[:4] != b"%PDF" and "pdf" not in content_type.lower():
+        return jsonify({"ok": False, "error": f"The linked document doesn't look like a PDF (content-type: {content_type or 'unknown'}) - GHMC may have returned an error/login page instead of the file."}), 502
+
+    try:
+        result = run_tender_anomaly_analysis(pdf_bytes, gemini_key)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Analysis failed: {str(e)[:300]}"}), 500
+
+    if not result:
+        return jsonify({"ok": False, "error": "Analysis returned no result - the document may be unreadable."}), 500
+
+    try:
+        site_token = os.environ.get("SITE_REPO_TOKEN")
+        log_tender_scrutiny_result(site_token, work_name, result, source="ghmc-manual-click")
+    except Exception:
+        pass  # logging failure shouldn't block returning the analysis itself
+
+    return jsonify({"ok": True, "result": result})
+
+
 @app.route('/api/ghmc-tender-watch', methods=['GET'])
 def ghmc_tender_watch():
     site_token = os.environ.get("SITE_REPO_TOKEN")
@@ -6175,7 +6265,7 @@ def health():
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
         "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
         "/api/youtube-flagged-comments", "/api/youtube-flagged-comment-action",
-        "/api/ghmc-tender-watch", "/api/ghmc-tenders-list", "/api/ghmc-connectivity-test",
+        "/api/ghmc-tender-watch", "/api/ghmc-tenders-list", "/api/ghmc-connectivity-test", "/api/ghmc-tender-scrutinize",
     ]})
 
 
