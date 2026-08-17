@@ -5833,25 +5833,34 @@ GHMC_SEEN_TENDERS_FILE = "ghmc-seen-tenders.json"
 
 
 def fetch_ghmc_tenders_page():
-    # Cloud Run containers sometimes fail DNS resolution when they try an
-    # IPv6 lookup first and there's no outbound IPv6 route, even though
-    # IPv4 works fine — this produces exactly the "Temporary failure in
-    # name resolution" error seen in testing. Force IPv4-only resolution
-    # for this call (scoped to just this function, restored immediately
-    # after) before assuming it's something more exotic like GHMC blocking
-    # cloud-provider IP ranges.
+    # "Temporary failure in name resolution" is a DNS lookup failure that
+    # happens BEFORE any connection attempt reaches GHMC's servers at all —
+    # so this isn't GHMC blocking us, it's the container's own DNS resolver
+    # failing on this particular lookup. The error's own wording says
+    # "temporary", and this class of container DNS hiccup often clears
+    # within a few seconds — so retry with a short backoff before giving up,
+    # rather than failing on the very first attempt. IPv4-only resolution
+    # kept too since it doesn't hurt and rules out a second possible cause.
     import socket
+    import time
     original_getaddrinfo = socket.getaddrinfo
 
     def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
 
     socket.getaddrinfo = _ipv4_only_getaddrinfo
+    last_error = None
     try:
-        req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        return html
+        for attempt in range(4):
+            try:
+                req = urllib.request.Request(GHMC_TENDERS_PAGE, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                with urllib.request.urlopen(req, timeout=25) as resp:
+                    return resp.read().decode("utf-8", errors="ignore")
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s backoff
+        raise last_error
     finally:
         socket.getaddrinfo = original_getaddrinfo
 
