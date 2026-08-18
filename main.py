@@ -6115,10 +6115,22 @@ def ghmc_tenders_list():
     # not every tender worth tracking is Patancheru-area-specific.
     all_rows = []
     fetch_errors = []
+    debug_sample = None
+    debug_html_len = None
     for page_url in TENDERDETAIL_GHMC_PAGES:
         try:
             html = fetch_tenderdetail_page(page_url)
-            all_rows.extend(parse_tenderdetail_rows(html))
+            page_rows = parse_tenderdetail_rows(html)
+            all_rows.extend(page_rows)
+            if debug_sample is None:
+                # Only captured once, from the first page, and only kept in
+                # the response when nothing parsed at all - this is purely a
+                # diagnostic aid since the parser was written without ever
+                # being able to see this domain's real HTML (blocked from
+                # this sandbox's own network too), so a wrong first guess at
+                # the markup shape is expected and needs a way to see why.
+                debug_html_len = len(html)
+                debug_sample = html[:800]
         except Exception as e:
             fetch_errors.append(str(e)[:200])
 
@@ -6138,6 +6150,8 @@ def ghmc_tenders_list():
         "tenders": all_rows,
         "total_scanned": len(all_rows),
         "partial_fetch_errors": fetch_errors or None,
+        "debug_html_len": debug_html_len if not all_rows else None,
+        "debug_sample": debug_sample if not all_rows else None,
     })
 
 
