@@ -6102,12 +6102,17 @@ def parse_tenderdetail_rows(html):
 def ghmc_tenders_list():
     # Public - GHMC's own tender listing has no useful data (see comment on
     # TENDERDETAIL_GHMC_PAGES above), so this pulls from tenderdetail.com's
-    # GHMC-authority listing across all 3 pages instead, then filters down to
-    # tenders whose title actually names a Patancheru-area place/circle.
+    # GHMC-authority listing across all 3 pages instead.
     # NOTE: the PDF itself is lead-gated on tenderdetail.com (name/phone/OTP
     # required) - there's no free direct document link here, so this only
-    # returns rich metadata (title, deadline, value, doc-availability marker)
-    # plus a link to the tender's real detail page, not a fetchable PDF URL.
+    # returns rich metadata (tender id, title, deadline, value, doc-
+    # availability marker) plus a link to the tender's real detail page, not
+    # a fetchable PDF URL. That's an accepted limitation for now.
+    #
+    # Returns the FULL scanned list (not pre-filtered to Patancheru) so the
+    # frontend can offer both the area filter and a free-text keyword filter
+    # (e.g. "school", "hospital") independently, per real use cases raised -
+    # not every tender worth tracking is Patancheru-area-specific.
     all_rows = []
     fetch_errors = []
     for page_url in TENDERDETAIL_GHMC_PAGES:
@@ -6120,10 +6125,17 @@ def ghmc_tenders_list():
     if not all_rows and fetch_errors:
         return jsonify({"ok": False, "error": f"Could not fetch tender listing: {'; '.join(fetch_errors)}"}), 500
 
-    matches = [r for r in all_rows if any(k in r["title"].lower() for k in PATANCHERU_AREA_KEYWORDS)]
+    # is_patancheru_area is precomputed server-side (same keyword list used
+    # by the auto-watch/Telegram endpoint, so "area" means the same thing in
+    # both places) - frontend uses it for a quick default filter, but every
+    # row is returned either way so a keyword search (school/hospital/etc)
+    # can run across all of them, not just the area-matched subset.
+    for r in all_rows:
+        r["is_patancheru_area"] = any(k in r["title"].lower() for k in PATANCHERU_AREA_KEYWORDS)
+
     return jsonify({
         "ok": True,
-        "tenders": matches,
+        "tenders": all_rows,
         "total_scanned": len(all_rows),
         "partial_fetch_errors": fetch_errors or None,
     })
