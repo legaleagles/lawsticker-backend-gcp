@@ -6776,7 +6776,101 @@ def translate_gold_checks():
     return jsonify({"ok": True, "translations": translations})
 
 
-@app.route('/', methods=['GET'])
+GOLD_SCHEME_CHECK_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "assessment": {"type": "STRING", "description": "3-5 sentence plain-language read of this specific scheme's terms - honest, not alarmist, calibrated"},
+        "effective_annual_value": {"type": "STRING", "description": "plain-language statement of what the bonus/discount actually works out to as a rough annual rate, e.g. 'roughly equivalent to an 8% annual bonus if redeemed at the end'"},
+        "flags": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "severity": {"type": "STRING", "enum": ["Low", "Medium", "High"]},
+                    "point": {"type": "STRING", "description": "one specific observation about this scheme's terms, under 200 characters"},
+                },
+                "required": ["severity", "point"],
+            },
+        },
+        "questions_to_ask": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": "3-5 specific, concrete questions this person should ask the shop before signing up, in plain language",
+        },
+    },
+    "required": ["assessment", "effective_annual_value", "flags", "questions_to_ask"],
+}
+
+
+@app.route('/api/gold-scheme-check', methods=['POST'])
+def gold_scheme_check():
+    # A calibrated plausibility read of a JEWELLER'S SPECIFIC SAVINGS SCHEME
+    # (the "11+1 months" style monthly-deposit schemes), not a general
+    # gold-investment recommendation - the person describes what a specific
+    # shop is offering them, and gets back a plain-language assessment, a
+    # rough sense of what the bonus/discount actually amounts to, and
+    # concrete questions to ask before signing up. Deliberately doesn't try
+    # to give investment advice on gold ETFs/SGB/etc - those are covered as
+    # static educational content elsewhere, not through this AI call.
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration - missing GEMINI_API_KEY."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    monthly_amount = body.get("monthly_amount")
+    duration_months = body.get("duration_months")
+    bonus_month = body.get("bonus_month", False)
+    bonus_detail = (body.get("bonus_detail") or "").strip()
+    redemption_condition = (body.get("redemption_condition") or "").strip()
+    other_terms = (body.get("other_terms") or "").strip()
+    lang = body.get("lang", "en")
+
+    if not monthly_amount or not duration_months:
+        return jsonify({"ok": False, "error": "monthly_amount and duration_months are required."}), 400
+
+    prompt = f"""A person is considering a jeweller's monthly gold savings scheme (the common Indian "pay monthly, get a bonus/discount at the end, redeemable only against jewellery purchase" format) and wants an honest read before signing up.
+
+Scheme terms as described by the person:
+- Monthly deposit: ₹{monthly_amount}
+- Duration: {duration_months} months
+- Bonus/extra month offered: {"Yes" if bonus_month else "No"}{f" - {bonus_detail}" if bonus_detail else ""}
+- Redemption condition: {redemption_condition or "not specified"}
+- Other terms mentioned: {other_terms or "none"}
+
+Give a calibrated, honest assessment - not alarmist, not naive. Specifically:
+1. What the bonus/discount actually works out to as a rough annual-equivalent value (be concrete with a rough percentage, but clearly caveat it's an approximation since it depends on gold price movement and isn't a guaranteed return like a bank deposit).
+2. Any genuine points of caution based on what WAS and WASN'T specified (e.g. if redemption condition wasn't described, that itself is worth asking about - most such schemes only let you redeem against jewellery purchase, not cash, and often only at that specific shop).
+3. 3-5 concrete, specific questions this person should actually ask the shop before signing up (e.g. about mandatory purchase, refund policy if the shop closes, whether the final gold rate is locked or market-rate-at-redemption, GST/making charge treatment on redemption).
+
+Be genuinely useful and specific, not generic filler. If the terms given are too sparse to say much, say so honestly rather than inventing detail."""
+
+    try:
+        result = call_gemini_structured(gemini_key, prompt, GOLD_SCHEME_CHECK_SCHEMA, max_tokens=800, timeout=25)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Analysis failed: {str(e)[:300]}"}), 502
+
+    if not result:
+        return jsonify({"ok": False, "error": "Analysis returned no result."}), 500
+
+    if lang in ("te", "hi"):
+        texts = [result.get("assessment", ""), result.get("effective_annual_value", "")]
+        for f in result.get("flags", []):
+            texts.append(f.get("point", ""))
+        for q in result.get("questions_to_ask", []):
+            texts.append(q)
+        translated = translate_texts_for_gold_bill(texts, lang, gemini_key)
+        if translated != texts and len(translated) == len(texts):
+            idx = 0
+            result["assessment"] = translated[idx]; idx += 1
+            result["effective_annual_value"] = translated[idx]; idx += 1
+            for f in result.get("flags", []):
+                f["point"] = translated[idx]; idx += 1
+            result["questions_to_ask"] = translated[idx:]
+
+    return jsonify({"ok": True, "result": result})
+
+
+
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
@@ -6788,7 +6882,7 @@ def health():
         "/api/daily-scam-ed", "/api/youtube-stats", "/api/ga4-daily-digest",
         "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
         "/api/youtube-flagged-comments", "/api/youtube-flagged-comment-action",
-        "/api/ghmc-tender-watch", "/api/ghmc-tenders-list", "/api/ghmc-connectivity-test",
+        "/api/ghmc-tender-watch", "/api/ghmc-tenders-list", "/api/ghmc-connectivity-test", "/api/gold-scheme-check",
     ]})
 
 
