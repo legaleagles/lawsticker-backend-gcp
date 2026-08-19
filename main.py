@@ -2101,6 +2101,429 @@ def check_gold_bill():
 
     return jsonify({"ok": True, "extracted": extracted, "checks": checks, "stone_price_table": stone_price_table, "making_charge_range": making_charge_range, "today_gold_rate": today_gold_rate})
 
+
+# ---------------------------------------------------------------------------
+# Silver Bill Checker — same pipeline shape as the gold checker above
+# (vision extraction, deterministic arithmetic check, live-rate cross-check,
+# AI making-charge-range context), adapted for silver's actual conventions:
+# purity is 999/925/800 (not karat), making charge is very commonly a flat
+# ₹/gram rate rather than a % of value, and there's no "weight uplift"
+# equivalent to gold's VA% pattern in ordinary silver retail billing.
+# ---------------------------------------------------------------------------
+
+SILVER_BILL_EXTRACT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "shop_name": {"type": "STRING"},
+        "bill_date": {"type": "STRING"},
+        "document_type": {"type": "STRING", "description": "'estimate' (pre-purchase quote, not yet paid) or 'receipt' (paid tax invoice for a completed purchase) - same distinguishing cues as a gold bill: GST invoice number/Paid/payment mode vs Estimate/Quotation."},
+        "printed_silver_rate_per_gram": {"type": "NUMBER"},
+        "item_description": {"type": "STRING"},
+        "item_purity": {"type": "STRING", "description": "e.g. '999', '925', '800' - the silver purity/fineness as printed, not karat"},
+        "gross_weight_g": {"type": "NUMBER"},
+        "net_weight_g": {"type": "NUMBER"},
+        "silver_value_amount": {"type": "NUMBER"},
+        "making_charge_type": {"type": "STRING", "description": "'per_gram', 'percent', 'fixed', or 'none' - whichever this specific bill actually shows"},
+        "making_charge_rate": {"type": "NUMBER", "description": "the rate itself, e.g. 100 if ₹100/gram, or 8 if 8%"},
+        "making_charge_amount": {"type": "NUMBER"},
+        "bulk_discount_amount": {"type": "NUMBER", "description": "any flat scheme/bulk discount subtracted, if shown - 0 if none"},
+        "gst_percent": {"type": "NUMBER"},
+        "gst_amount": {"type": "NUMBER"},
+        "final_amount": {"type": "NUMBER"},
+    },
+    "required": ["item_description", "net_weight_g", "final_amount"]
+}
+
+
+def build_silver_bill_extract_prompt():
+    return """This is a photographed silver jewellery/article shop document - could be a pre-purchase ESTIMATE or a final paid RECEIPT. Identify document_type using the same cues as any retail bill (GST invoice number/Paid/payment mode = receipt; Estimate/Quotation/no invoice number = estimate).
+
+Extract every field genuinely printed on THIS bill. Never invent or guess a number that isn't actually shown - leave it 0 or empty instead.
+
+Pay close attention to:
+- The silver PURITY as printed (999 fine silver, 925 sterling, or 800 German silver) - this is a fineness number, not a karat.
+- How making charges are actually structured on this specific bill - silver most commonly uses a flat ₹-per-gram rate (e.g. "₹100/g x weight"), but some bills use a percentage of silver value instead, or a fixed rupee amount regardless of weight, or no separate making charge line at all. Identify which one this bill actually uses (making_charge_type) and the rate itself (making_charge_rate), not just the final rupee amount.
+- Any flat bulk/scheme discount subtracted from the total (common in "buy 100g get discount" style silver promotions).
+- The exact printed silver rate per gram, and the bill's date exactly as printed.
+
+Accuracy matters more than completeness here - this is being used to verify the shop's own arithmetic."""
+
+
+SILVER_MAKING_CONTEXT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "typical_low": {"type": "NUMBER"},
+        "typical_high": {"type": "NUMBER"},
+        "unit": {"type": "STRING", "description": "'per_gram_rupees' or 'percent' matching whichever the bill actually used"},
+        "note": {"type": "STRING"},
+    },
+    "required": ["typical_low", "typical_high", "unit", "note"]
+}
+
+
+def build_silver_making_context_prompt(extracted):
+    charge_type = extracted.get("making_charge_type", "per_gram")
+    unit_hint = "₹ per gram" if charge_type == "per_gram" else ("% of silver value" if charge_type == "percent" else "a fixed rupee amount")
+    return f"""A customer photographed this silver jewellery/article bill. Give the TYPICAL making-charge range for this specific type of silver item in the Indian retail market, expressed in the SAME unit this bill actually used ({unit_hint}) - plain silver articles/coins run low, while intricate silver jewellery with real handwork justifies a higher rate.
+
+Item: {extracted.get('item_description', 'unknown')}
+This bill's making charge: {extracted.get('making_charge_rate', 'not stated')} ({charge_type})
+
+Give a realistic typical_low and typical_high in the matching unit, and a one-sentence note on what level of work justifies that range for this specific item."""
+
+
+@app.route('/api/check-silver-bill', methods=['POST'])
+def check_silver_bill():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    image_base64 = body.get("image_base64")
+    image_mime = body.get("image_mime", "image/jpeg")
+    city = body.get("city", "hyderabad")
+    lang = body.get("lang", "en")
+    if not image_base64:
+        return jsonify({"ok": False, "error": "image_base64 is required."}), 400
+
+    try:
+        parts = [
+            {"text": build_silver_bill_extract_prompt()},
+            {"inline_data": {"mime_type": image_mime, "data": image_base64}},
+        ]
+        payload = json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "maxOutputTokens": 2500,
+                "responseMimeType": "application/json",
+                "responseSchema": SILVER_BILL_EXTRACT_SCHEMA,
+            },
+        }).encode()
+        req = urllib.request.Request(
+            f"{GEMINI_URL}?key={gemini_key}",
+            data=payload, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            result = json.loads(resp.read().decode())
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        extracted = json.loads(raw_text)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this bill: {str(e)[:300]}"}), 502
+
+    checks = []
+
+    # Deterministic arithmetic check
+    try:
+        silver_val = extracted.get("silver_value_amount") or 0
+        mc = extracted.get("making_charge_amount") or 0
+        discount = extracted.get("bulk_discount_amount") or 0
+        gst_amt = extracted.get("gst_amount") or 0
+        final = extracted.get("final_amount") or 0
+        computed = silver_val + mc - discount + gst_amt
+        if final > 0 and silver_val > 0:
+            diff_pct = abs(computed - final) / final * 100
+            if diff_pct < 1:
+                checks.append({"status": "ok", "title": "Arithmetic checks out",
+                                "detail": "Silver value + making charge" + (" - scheme discount" if discount else "") + " + GST adds up to the final amount printed."})
+            else:
+                checks.append({"status": "warn", "title": "The printed total doesn't quite match the line items",
+                                "detail": f"Adding up the individual lines gives ₹{round(computed):,}, but the bill's final amount is ₹{round(final):,} — worth asking the shop to explain the difference."})
+    except Exception:
+        pass
+
+    # Making-charge type transparency note - always shown when a type was
+    # identified, since knowing HOW a shop structures making charges (flat
+    # ₹/g vs % vs fixed) is itself useful for comparing shops, same spirit
+    # as the gold checker's weight-based-vs-value-based note.
+    try:
+        mc_type = extracted.get("making_charge_type")
+        mc_rate = extracted.get("making_charge_rate")
+        if mc_type and mc_type != "none" and mc_rate:
+            type_label = {"per_gram": f"₹{mc_rate}/gram flat rate", "percent": f"{mc_rate}% of silver value", "fixed": f"a fixed ₹{mc_rate} regardless of weight"}.get(mc_type, mc_type)
+            checks.append({"status": "info", "title": "Making charge structure",
+                            "detail": f"This shop charges making as {type_label}. Worth using the same structure when comparing quotes from other shops, since a flat per-gram rate and a percentage can look very different in rupee terms depending on the item's value."})
+    except Exception:
+        pass
+
+    # AI making-charge typical-range context
+    making_charge_range = None
+    try:
+        range_result = call_gemini_structured(gemini_key, build_silver_making_context_prompt(extracted), SILVER_MAKING_CONTEXT_SCHEMA, max_tokens=300, timeout=25)
+        if range_result and range_result.get("typical_high"):
+            making_charge_range = {
+                "bill_rate": extracted.get("making_charge_rate") or 0,
+                "typical_low": range_result["typical_low"],
+                "typical_high": range_result["typical_high"],
+                "unit": range_result.get("unit", "per_gram_rupees"),
+                "note": range_result.get("note", ""),
+            }
+    except Exception:
+        pass
+
+    # Live silver rate cross-check - identical three-way logic (today's
+    # bill / receipt / old estimate) as the gold checker, same reasoning
+    # for why each case is framed differently.
+    today_silver_rate = None
+    try:
+        bill_date_str = (extracted.get("bill_date") or "").strip()
+        today_str_ist = today_ist().isoformat()
+        is_today = False
+        parsed_bill_date = None
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                parsed_bill_date = datetime.strptime(bill_date_str.split(" ")[0], fmt).date()
+                is_today = parsed_bill_date.isoformat() == today_str_ist
+                break
+            except Exception:
+                continue
+        printed_rate = extracted.get("printed_silver_rate_per_gram") or 0
+        purity = (extracted.get("item_purity") or "999").strip()
+        doc_type = (extracted.get("document_type") or "estimate").strip().lower()
+        is_receipt = doc_type == "receipt"
+        real_prices, matched_city, _ = fetch_real_silver_rate(city)
+        if real_prices:
+            today_silver_rate = {"city": matched_city, "rate_999": real_prices.get("999"), "rate_925": real_prices.get("925")}
+            if printed_rate > 0 and purity in real_prices:
+                real_rate = real_prices[purity]
+                diff = printed_rate - real_rate
+                if is_today:
+                    if abs(diff) < 5:
+                        checks.append({"status": "ok", "title": "Silver rate matches today's real published rate",
+                                        "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity} rate for {matched_city.title()} is ₹{real_rate}/g."})
+                    else:
+                        checks.append({"status": "warn", "title": "Silver rate differs from today's real published rate",
+                                        "detail": f"Shop quoted ₹{printed_rate}/g — today's real {purity} rate for {matched_city.title()} is ₹{real_rate}/g, a difference of ₹{abs(round(diff))}/g."})
+                elif is_receipt:
+                    date_label = parsed_bill_date.strftime("%d %b %Y") if parsed_bill_date else (bill_date_str or "an earlier date")
+                    checks.append({"status": "info", "title": "This was a completed purchase — for your records",
+                                    "detail": f"This receipt is dated {date_label}, with a printed rate of ₹{printed_rate}/g. Today's real {purity} rate for {matched_city.title()} is ₹{real_rate}/g, just for reference — silver moves daily, so this alone doesn't tell you if the rate was fair on the day you bought it."})
+                else:
+                    date_label = parsed_bill_date.strftime("%d %b %Y") if parsed_bill_date else (bill_date_str or "an earlier date")
+                    direction = "higher" if diff < 0 else "lower" if diff > 0 else "the same as"
+                    checks.append({"status": "caution", "title": "This bill is old — check today's rate before you pay",
+                                    "detail": f"This estimate was dated {date_label}, quoting ₹{printed_rate}/g. Today's real {purity} rate for {matched_city.title()} is ₹{real_rate}/g — {direction} than what's on this old bill. Confirm today's rate before finalizing."})
+    except Exception:
+        pass
+
+    if lang in ("te", "hi") and checks:
+        texts = []
+        for c in checks:
+            texts.append(c["title"])
+            texts.append(c["detail"])
+        if making_charge_range and making_charge_range.get("note"):
+            texts.append(making_charge_range["note"])
+        translated = translate_texts_for_gold_bill(texts, lang, gemini_key)
+        if translated != texts:
+            for i, c in enumerate(checks):
+                c["title"] = translated[i * 2]
+                c["detail"] = translated[i * 2 + 1]
+            if making_charge_range and making_charge_range.get("note"):
+                making_charge_range["note"] = translated[-1]
+
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "making_charge_range": making_charge_range, "today_silver_rate": today_silver_rate})
+
+
+# ---------------------------------------------------------------------------
+# Diamond Bill Checker — different shape from gold/silver since diamonds
+# have no daily published spot rate the way precious metals do. Instead of
+# building new search logic, this reuses two pieces already proven for the
+# gold checker: the stone-price-search machinery (by treating the diamond
+# itself as a single synthetic "stone" with its own carat/rate/amount) for
+# per-carat market-price validation, and fetch_real_gold_rate for the gold
+# setting's own rate cross-check, since that part genuinely IS a precious
+# metal with a live rate.
+# ---------------------------------------------------------------------------
+
+DIAMOND_BILL_EXTRACT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "shop_name": {"type": "STRING"},
+        "bill_date": {"type": "STRING"},
+        "document_type": {"type": "STRING", "description": "'estimate' or 'receipt' - same cues as gold/silver bills"},
+        "diamond_carat": {"type": "NUMBER"},
+        "diamond_shape": {"type": "STRING"},
+        "diamond_color_grade": {"type": "STRING"},
+        "diamond_clarity_grade": {"type": "STRING"},
+        "certificate_number": {"type": "STRING", "description": "IGI/GIA/other lab certificate number if printed - empty if none shown"},
+        "certificate_lab": {"type": "STRING", "description": "e.g. 'IGI', 'GIA', 'other' - empty if no certificate shown"},
+        "price_per_carat": {"type": "NUMBER"},
+        "diamond_value_amount": {"type": "NUMBER"},
+        "setting_weight_g": {"type": "NUMBER"},
+        "setting_purity_karat": {"type": "STRING"},
+        "setting_gold_rate_per_gram": {"type": "NUMBER"},
+        "setting_gold_value_amount": {"type": "NUMBER"},
+        "making_charge_amount": {"type": "NUMBER"},
+        "gst_percent": {"type": "NUMBER"},
+        "gst_amount": {"type": "NUMBER"},
+        "final_amount": {"type": "NUMBER"},
+    },
+    "required": ["diamond_carat", "final_amount"]
+}
+
+
+def build_diamond_bill_extract_prompt():
+    return """This is a photographed diamond jewellery shop document - a pre-purchase ESTIMATE or a paid RECEIPT (same distinguishing cues as any retail bill).
+
+Extract every field genuinely printed. Never invent a number that isn't actually shown.
+
+Pay close attention to:
+- The diamond's carat weight, shape/cut, color grade (e.g. G-H), and clarity grade (e.g. VS1) exactly as printed.
+- Any certificate number and issuing lab (IGI, GIA, or other) - if genuinely no certificate is shown or mentioned on this bill, leave certificate_number empty rather than guessing.
+- The diamond's own price-per-carat and total diamond value, separately from the gold setting's value - these are usually two distinct line items on a diamond jewellery bill.
+- The gold SETTING separately: its weight, purity (karat), the gold rate used for it, and its value - this is billed like ordinary gold jewellery alongside the diamond.
+- Making charges, GST, and the final total.
+
+Accuracy matters more than completeness - this verifies the shop's own arithmetic and pricing."""
+
+
+@app.route('/api/check-diamond-bill', methods=['POST'])
+def check_diamond_bill():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    image_base64 = body.get("image_base64")
+    image_mime = body.get("image_mime", "image/jpeg")
+    city = body.get("city", "hyderabad")
+    lang = body.get("lang", "en")
+    if not image_base64:
+        return jsonify({"ok": False, "error": "image_base64 is required."}), 400
+
+    try:
+        parts = [
+            {"text": build_diamond_bill_extract_prompt()},
+            {"inline_data": {"mime_type": image_mime, "data": image_base64}},
+        ]
+        payload = json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "maxOutputTokens": 2500,
+                "responseMimeType": "application/json",
+                "responseSchema": DIAMOND_BILL_EXTRACT_SCHEMA,
+            },
+        }).encode()
+        req = urllib.request.Request(
+            f"{GEMINI_URL}?key={gemini_key}",
+            data=payload, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            result = json.loads(resp.read().decode())
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        extracted = json.loads(raw_text)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this bill: {str(e)[:300]}"}), 502
+
+    checks = []
+
+    # Certificate presence - a genuinely distinct diamond-specific risk
+    # signal that gold/silver bills don't have an equivalent of.
+    cert_no = (extracted.get("certificate_number") or "").strip()
+    if not cert_no:
+        checks.append({"status": "caution", "title": "No certificate number found on this bill",
+                        "detail": "Loose or uncertified diamonds carry more pricing uncertainty than lab-certified ones (IGI/GIA). If this is a real purchase, ask the shop for the certificate and independently verify the report number on the issuing lab's own website before finalizing."})
+    else:
+        checks.append({"status": "ok", "title": f"Certificate found: {extracted.get('certificate_lab') or 'lab'} #{cert_no}",
+                        "detail": "Worth independently verifying this exact certificate number on the issuing lab's own website (igi.org or gia.edu) rather than trusting the printed copy alone — this takes under a minute and confirms the certificate is real and matches this stone."})
+
+    # Deterministic arithmetic: diamond value + setting gold value + making + GST = final
+    try:
+        diamond_val = extracted.get("diamond_value_amount") or 0
+        setting_val = extracted.get("setting_gold_value_amount") or 0
+        mc = extracted.get("making_charge_amount") or 0
+        gst_amt = extracted.get("gst_amount") or 0
+        final = extracted.get("final_amount") or 0
+        computed = diamond_val + setting_val + mc + gst_amt
+        if final > 0 and diamond_val > 0:
+            diff_pct = abs(computed - final) / final * 100
+            if diff_pct < 1:
+                checks.append({"status": "ok", "title": "Arithmetic checks out",
+                                "detail": "Diamond value + gold setting value + making charge + GST adds up to the final amount printed."})
+            else:
+                checks.append({"status": "warn", "title": "The printed total doesn't quite match the line items",
+                                "detail": f"Adding up the individual lines gives ₹{round(computed):,}, but the bill's final amount is ₹{round(final):,} — worth asking the shop to explain the difference."})
+    except Exception:
+        pass
+
+    # Diamond per-carat market check - reuses the exact stone-price-search
+    # pipeline already built and proven for stones set inside gold bills,
+    # by treating this diamond as a single synthetic "stone" entry. Same
+    # search-grounded approach, same jewellery-shop-grade (not loose-gem-
+    # trade-scale) framing.
+    diamond_price_check = None
+    try:
+        carat = extracted.get("diamond_carat") or 0
+        rate = extracted.get("price_per_carat") or 0
+        if carat > 0 and rate > 0:
+            synthetic_stone = [{
+                "stone_type": f"{carat}ct {extracted.get('diamond_shape', 'round')} diamond, {extracted.get('diamond_color_grade', 'unspecified')} color, {extracted.get('diamond_clarity_grade', 'unspecified')} clarity",
+                "weight_ct": carat, "rate_per_ct": rate, "amount": extracted.get("diamond_value_amount") or 0,
+            }]
+            stone_text, _ = call_gemini_grounded(gemini_key, build_stone_price_prompt(synthetic_stone), max_tokens=700)
+            if stone_text:
+                structured = call_gemini_structured(gemini_key, build_stone_structure_prompt(stone_text, synthetic_stone), STONE_PRICE_STRUCTURE_SCHEMA, max_tokens=400, timeout=20)
+                if structured and structured.get("stones"):
+                    row = structured["stones"][0]
+                    diamond_price_check = {
+                        "bill_rate_per_ct": rate, "market_low_per_ct": row.get("market_low_per_ct"),
+                        "market_high_per_ct": row.get("market_high_per_ct"), "carat": carat,
+                    }
+                    low, high = row.get("market_low_per_ct", 0), row.get("market_high_per_ct", 0)
+                    if low and high:
+                        if rate < low:
+                            checks.append({"status": "info", "title": "Price per carat is below the typical market range",
+                                            "detail": f"Bill shows ₹{rate:,}/ct — typical range for this grade is ₹{low:,}–₹{high:,}/ct. Worth double-checking the stated color/clarity grade matches the certificate, since a below-range price can also mean a lower actual grade than described."})
+                        elif rate > high:
+                            checks.append({"status": "warn", "title": "Price per carat is above the typical market range",
+                                            "detail": f"Bill shows ₹{rate:,}/ct — typical range for this grade is ₹{low:,}–₹{high:,}/ct. Worth asking the shop what specifically justifies the premium (certificate lab reputation, fluorescence, cut quality beyond the basic grade shown)."})
+                        else:
+                            checks.append({"status": "ok", "title": "Price per carat is within the typical market range",
+                                            "detail": f"Bill shows ₹{rate:,}/ct, within the typical ₹{low:,}–₹{high:,}/ct range for this grade."})
+    except Exception:
+        pass
+
+    # Gold setting arithmetic (pure math) + live gold-rate cross-check
+    # (reuses fetch_real_gold_rate directly - the setting genuinely is
+    # ordinary gold jewellery pricing, same rules apply).
+    today_gold_rate = None
+    try:
+        setting_wt = extracted.get("setting_weight_g") or 0
+        setting_rate = extracted.get("setting_gold_rate_per_gram") or 0
+        setting_purity = (extracted.get("setting_purity_karat") or "18").replace("K", "").replace("k", "").strip()
+        setting_val = extracted.get("setting_gold_value_amount") or 0
+        if setting_wt > 0 and setting_rate > 0 and setting_val > 0:
+            expected = setting_wt * setting_rate
+            diff_pct = abs(expected - setting_val) / setting_val * 100
+            if diff_pct >= 2:
+                checks.append({"status": "warn", "title": "Gold setting value doesn't match weight × rate",
+                                "detail": f"{setting_wt}g × ₹{setting_rate}/g = ₹{round(expected):,}, but the bill shows the setting valued at ₹{round(setting_val):,}."})
+        real_prices, matched_city = fetch_real_gold_rate(city)
+        if real_prices:
+            today_gold_rate = {"city": matched_city, "rate_22k": real_prices.get("22"), "rate_24k": real_prices.get("24")}
+            if setting_rate > 0 and setting_purity in real_prices:
+                real_rate = real_prices[setting_purity]
+                diff = setting_rate - real_rate
+                if abs(diff) >= 50:
+                    checks.append({"status": "info", "title": "Setting's gold rate differs from today's real rate",
+                                    "detail": f"Setting priced at ₹{setting_rate}/g for {setting_purity}K — today's real rate for {matched_city.title()} is ₹{real_rate}/g. Gold prices move daily, so check this is current before finalizing."})
+    except Exception:
+        pass
+
+    if lang in ("te", "hi") and checks:
+        texts = []
+        for c in checks:
+            texts.append(c["title"])
+            texts.append(c["detail"])
+        translated = translate_texts_for_gold_bill(texts, lang, gemini_key)
+        if translated != texts:
+            for i, c in enumerate(checks):
+                c["title"] = translated[i * 2]
+                c["detail"] = translated[i * 2 + 1]
+
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks, "diamond_price_check": diamond_price_check, "today_gold_rate": today_gold_rate})
+
 # ---------------------------------------------------------------------------
 # Today's Legal Update — replaces the old generic news-ticker (which pulled
 # irrelevant global wire stories and had a broken/never-scheduled refresh
@@ -3497,7 +3920,67 @@ def fetch_real_gold_rate(city="hyderabad"):
     return prices, city
 
 
-def escape_html_digest(text):
+def extract_silver_prices(text):
+    # Mirrors extract_gold_prices, same source page, same "never guess a
+    # number it can't find" discipline. Real-world phrasing on rate-tracker
+    # sites varies more than gold's fixed "per gram for 24 karat" pattern
+    # (seen variants: "per gram for 999 silver", "...for 999 purity
+    # silver", plain "silver rate ... is ₹X per gram") - multiple patterns
+    # tried in order, first match wins.
+    patterns = [
+        r"(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)\s*per gram for (?:999|fine)(?:\s*purity)?\s*silver",
+        r"silver rate.{0,60}?(?:in|for)\s*\w+.{0,30}?(?:is|:)\s*(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)\s*per gram",
+        r"Silver Rate Today.{0,80}?(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)",
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+    return None
+
+
+def fetch_real_silver_rate(city="hyderabad"):
+    city = city.lower().strip()
+    if city not in GOLD_CITY_SLUGS:
+        city = "hyderabad"
+    url = f"https://www.goodreturns.in/silver-rates/{city}.html"
+    text = fetch_text_digest(url)
+    rate_999 = extract_silver_prices(text)
+    if not rate_999:
+        return None, city, text
+    # 925 (Sterling) and 800 (German Silver) aren't published directly on
+    # this page - derived from the real 999 figure using standard purity
+    # fractions, same approach as gold's 20K/14K derivation above.
+    prices = {
+        "999": round(rate_999),
+        "925": round(rate_999 * 0.925),
+        "800": round(rate_999 * 0.800),
+    }
+    return prices, city, None
+
+
+@app.route('/api/live-silver-rate', methods=['GET'])
+def live_silver_rate():
+    city = request.args.get("city", "hyderabad")
+    prices, matched_city, raw_text_on_fail = fetch_real_silver_rate(city)
+    if not prices:
+        # Same diagnostic pattern used for the GHMC tender scraper - return
+        # a sample of what the source page actually said instead of just
+        # failing silently, since this parser was written without being
+        # able to verify the exact real page wording in advance.
+        return jsonify({
+            "ok": False,
+            "error": "Could not extract live silver rate right now - source page wording may differ from what was expected.",
+            "source": "unavailable",
+            "debug_sample": (raw_text_on_fail or "")[:1500],
+        }), 502
+    return jsonify({"ok": True, "city": matched_city, "rates": prices, "source": "goodreturns_real"})
+
+
+
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
