@@ -7094,14 +7094,41 @@ def ai_usage_summary():
     daily_avg_cost = last7_summary["total_cost_usd"] / max(days_with_data, 1)
     forecast_30d = round(daily_avg_cost * 30, 2)
 
+    # Live USD->INR rate, reusing the same free source already used for the
+    # gold-rate calculators elsewhere on this site - falls back to a fixed
+    # rate if the live fetch fails, since a currency-conversion hiccup
+    # should never take down the whole usage summary.
+    usd_to_inr = 88.0
+    inr_rate_source = "fallback_fixed"
+    try:
+        fx = fetch_json("https://open.er-api.com/v6/latest/USD")
+        usd_to_inr = fx["rates"]["INR"]
+        inr_rate_source = "live"
+    except Exception:
+        pass
+
+    def to_inr(usd):
+        return round(usd * usd_to_inr, 2)
+
+    def add_inr(summary):
+        summary["total_cost_inr"] = to_inr(summary["total_cost_usd"])
+        for a in summary["by_action"]:
+            summary["by_action"][a]["cost_inr"] = to_inr(summary["by_action"][a]["cost_usd"])
+        return summary
+
+    today_summary = add_inr(today_summary)
+    last7_summary = add_inr(last7_summary)
+
     result = {
         "ok": True,
         "today": today_summary,
         "last_7_days": last7_summary,
+        "exchange_rate": {"usd_to_inr": usd_to_inr, "source": inr_rate_source},
         "forecast": {
             "basis": f"trailing average over {days_with_data} day(s) with recorded activity in the last 7",
             "avg_daily_cost_usd": round(daily_avg_cost, 4),
             "forecast_30_day_cost_usd": forecast_30d,
+            "forecast_30_day_cost_inr": to_inr(forecast_30d),
             "note": "Rough estimate from recent activity, not a guarantee - real usage varies day to day.",
         },
         "known_gap": "GEMINI_MODEL is currently pinned to the 'gemini-flash-lite-latest' alias, not a dated model name. If Google repoints this alias to a different/pricier model, logged costs here would silently understate the real bill until GEMINI_PRICING is updated to match. Pinning to an explicit model name is recommended.",
@@ -7114,20 +7141,21 @@ def ai_usage_summary():
             lines = [
                 f"📊 <b>AI Usage Summary — {today_ist().strftime('%d %b %Y')}</b>",
                 "",
-                f"<b>Today:</b> {today_summary['total_calls']} calls · ${today_summary['total_cost_usd']:.4f}",
-                f"<b>Last 7 days:</b> {last7_summary['total_calls']} calls · ${last7_summary['total_cost_usd']:.4f}",
+                f"<b>Today:</b> {today_summary['total_calls']} calls · ₹{today_summary['total_cost_inr']:.2f} (${today_summary['total_cost_usd']:.4f})",
+                f"<b>Last 7 days:</b> {last7_summary['total_calls']} calls · ₹{last7_summary['total_cost_inr']:.2f} (${last7_summary['total_cost_usd']:.4f})",
                 "",
-                f"📈 <b>30-day forecast:</b> ~${forecast_30d:.2f} (based on recent daily average)",
+                f"📈 <b>30-day forecast:</b> ~₹{to_inr(forecast_30d):.2f} (~${forecast_30d:.2f}, based on recent daily average)",
                 "",
                 "<b>Today by feature:</b>",
             ]
             if today_summary["by_action"]:
                 sorted_actions = sorted(today_summary["by_action"].items(), key=lambda x: -x[1]["cost_usd"])
                 for action, data in sorted_actions[:10]:
-                    lines.append(f"• {data['label']}: {data['calls']} calls, ${data['cost_usd']:.4f}")
+                    lines.append(f"• {data['label']}: {data['calls']} calls, ₹{data['cost_inr']:.2f}")
             else:
                 lines.append("No AI calls logged today.")
             lines.append("")
+            lines.append(f"💱 INR conversion: {'live' if inr_rate_source == 'live' else 'fallback fixed'} rate, ₹{usd_to_inr:.2f}/USD")
             lines.append("⚠️ Model pinned via a '-latest' alias — costs are a best-effort estimate, see /api/ai-usage-summary for details.")
             try:
                 send_telegram_to_all(bot_token, chat_id_config, "\n".join(lines))
