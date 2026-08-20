@@ -7069,7 +7069,13 @@ def ai_usage_summary():
     # somewhat irregularly, a more "sophisticated" model would just be
     # fitting noise. Framed honestly as a rough estimate in the output,
     # not a precise prediction.
-    if not check_tender_scrutiny_password(request.args.get("password", "")):
+    #
+    # Password comes from a header, not a URL query param - a password in
+    # the URL ends up in Cloud Run's access logs, in cron-job.org's own
+    # stored job config, and (for anyone testing by pasting the URL into a
+    # browser) in browser history. A header isn't logged by any of those
+    # by default.
+    if not check_tender_scrutiny_password(request.headers.get("X-Admin-Password", "")):
         return jsonify({"ok": False, "error": "Incorrect or missing password."}), 401
 
     site_token = os.environ.get("SITE_REPO_TOKEN")
