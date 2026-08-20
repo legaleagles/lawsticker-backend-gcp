@@ -5457,27 +5457,22 @@ def daily_scam_ed():
                 if dup.get("is_duplicate"):
                     continue
 
-            # Phase 1 — grounded search for a real, sourced case. Tries Grok
-            # first (pilot - moves this call off Gemini's cap, and its
-            # X-search may surface scam reports that circulate on X before
-            # anywhere else), falling back to the proven Gemini path if
-            # Grok isn't configured or its call/response fails for any
-            # reason - this phase is a hard gate for the whole feature
-            # (no source, no publish), so it must not become less reliable
-            # than it was before this pilot.
+            # Phase 1 — grounded search for a real, sourced case. Grok only
+            # for this step (pilot) - deliberately no Gemini fallback here.
+            # Falling back would mean every Grok failure quietly burns a
+            # Gemini call anyway, defeating the point of paying for Grok
+            # credits specifically to keep this load off Gemini. If Grok
+            # isn't configured or its call/response fails, this topic
+            # attempt is simply skipped (same as the other skip conditions
+            # already in this loop) rather than routed to Gemini.
             search_prompt = build_grounded_search_prompt(category, topic_label)
-            grounded_text, source_urls = None, None
             xai_key = os.environ.get("XAI_API_KEY")
-            if xai_key:
-                try:
-                    grounded_text, source_urls = call_grok_search(xai_key, search_prompt)
-                except Exception:
-                    grounded_text, source_urls = None, None
-            if not grounded_text:
-                try:
-                    grounded_text, source_urls = call_gemini_grounded(gemini_key, search_prompt)
-                except Exception:
-                    continue
+            if not xai_key:
+                continue
+            try:
+                grounded_text, source_urls = call_grok_search(xai_key, search_prompt)
+            except Exception:
+                continue
 
             if not grounded_text or "NO VERIFIABLE SOURCE FOUND" in grounded_text or not source_urls:
                 continue  # hard gate: no real source URL, no publish
