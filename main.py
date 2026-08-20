@@ -119,6 +119,8 @@ GEMINI_PRICING = {
     "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40},  # last known rate before this model was shut down by Google June 1, 2026 - see call_gemini_search, likely broken since then
+    "gemini-2.5-flash-image": {"input": 0.30, "output": 30.00},  # output rate is a rough text-token proxy only - real image pricing is $30/1M image-output-tokens (~$0.039/image), not a clean per-request number this table can represent precisely
 }
 
 
@@ -2002,6 +2004,10 @@ def check_gold_bill():
         )
         with urllib.request.urlopen(req, timeout=45) as resp:
             result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("check_gold_bill", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         extracted = json.loads(raw_text)
     except Exception as e:
@@ -2294,6 +2300,10 @@ def check_silver_bill():
         )
         with urllib.request.urlopen(req, timeout=45) as resp:
             result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("check_silver_bill", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         extracted = json.loads(raw_text)
     except Exception as e:
@@ -2499,6 +2509,10 @@ def check_diamond_bill():
         )
         with urllib.request.urlopen(req, timeout=45) as resp:
             result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("check_diamond_bill", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         extracted = json.loads(raw_text)
     except Exception as e:
@@ -2941,6 +2955,10 @@ def pyq_extract():
     try:
         with urllib.request.urlopen(req, timeout=170) as resp:
             result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("pyq_auto_extract", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         parsed = json.loads(raw_text)
     except urllib.error.HTTPError as he:
@@ -3159,6 +3177,10 @@ def call_gemini_image(api_key, art_prompt):
     try:
         with urllib.request.urlopen(req, timeout=25) as resp:
             result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("call_gemini_image", GEMINI_IMAGE_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
         for part in result["candidates"][0]["content"]["parts"]:
             if "inlineData" in part:
                 return base64.b64decode(part["inlineData"]["data"])
@@ -3292,6 +3314,10 @@ def call_gemini_askai(api_key, prompt, image_base64=None, image_mime_type=None):
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         result = json.loads(resp.read().decode())
+    try:
+        log_ai_call("call_gemini_askai", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+    except Exception:
+        pass
     try:
         return result["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError):
@@ -3649,6 +3675,10 @@ Stay factual and general. Use simple, everyday language. If you're not confident
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         result = json.loads(resp.read().decode())
+    try:
+        log_ai_call("call_gemini_enrichment", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+    except Exception:
+        pass
     try:
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
@@ -4674,6 +4704,10 @@ def call_gemini_search(api_key, prompt):
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read().decode())
+            try:
+                log_ai_call("call_gemini_search", SC_SEARCH_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+            except Exception:
+                pass
             parts = result["candidates"][0]["content"]["parts"]
             text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
             if text:
@@ -6118,6 +6152,10 @@ def ga4_daily_digest():
                     )
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         result = json.loads(resp.read().decode())
+                    try:
+                        log_ai_call("ga4_daily_digest_analysis", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+                    except Exception:
+                        pass
                     analysis_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
                     lines.append(f"\n🤖 <b>Analysis</b>\n{analysis_text}")
                 except Exception as ge:
@@ -6330,6 +6368,10 @@ def run_tender_anomaly_analysis(pdf_bytes, gemini_key):
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
         raw = json.loads(resp.read().decode())
+    try:
+        log_ai_call("tender_anomaly_analysis", GEMINI_MODEL, raw.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+    except Exception:
+        pass
     return json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
 
 
