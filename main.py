@@ -20,6 +20,7 @@ import hashlib
 import io
 import textwrap
 import time
+import inspect
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -87,6 +88,85 @@ def send_telegram(bot_token, chat_id, text):
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.status
+
+
+# ---------------------------------------------------------------------------
+# AI usage tracking - logs every Gemini call that goes through the two
+# shared helpers below (call_gemini_structured, call_gemini_grounded),
+# which covers the large majority of call sites across the site. The
+# "action" is auto-detected from the immediate caller's function name via
+# the call stack rather than hand-labelling 24+ call sites individually -
+# lower-risk than touching every site, and the label is usually the exact
+# route/feature name anyway (e.g. "check_gold_bill", "daily_scam_ed").
+#
+# KNOWN GAP: GEMINI_MODEL is currently pinned to "gemini-flash-lite-latest"
+# - an alias, not a dated model name. This is the exact pattern that once
+# caused a real 30-60x cost drift on this project when Google silently
+# repointed a "-latest" alias to a flagship model. Costs logged here use
+# GEMINI_PRICING_FALLBACK (today's real Flash-Lite rate) as a best-effort
+# estimate, but if the alias drifts again, logged costs would silently
+# become wrong in the same way the original bill did. Pinning to an
+# explicit dated model name (e.g. "gemini-2.5-flash-lite") would close
+# this gap and make logged cost numbers actually trustworthy - recommended
+# as a follow-up, not done here since it's a separate change from tracking.
+# ---------------------------------------------------------------------------
+AI_USAGE_LOG_REPO = "legaleagles/LabourLaw2"  # same repo GITHUB_API/REPO already point to for site state
+GEMINI_PRICING_FALLBACK = {"input": 0.10, "output": 0.40}  # USD per 1M tokens - today's real rate for whatever gemini-flash-lite-latest currently resolves to
+GEMINI_PRICING = {
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+    "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
+    "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
+    "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+}
+
+
+def _ai_usage_log_filename(date_obj):
+    return f"ai-usage-log-{date_obj.isoformat()}.json"
+
+
+def log_ai_call(action, model, usage_metadata, site_token):
+    # Never let logging break the actual feature that triggered it - any
+    # failure here (GitHub API hiccup, SHA conflict, missing token) is
+    # swallowed silently rather than raised, since usage tracking is
+    # observability, not something a user-facing request should ever fail
+    # because of.
+    if not site_token or not usage_metadata:
+        return
+    try:
+        input_tokens = usage_metadata.get("promptTokenCount", 0) or 0
+        output_tokens = usage_metadata.get("candidatesTokenCount", 0) or 0
+        rates = GEMINI_PRICING.get(model, GEMINI_PRICING_FALLBACK)
+        cost = (input_tokens / 1_000_000 * rates["input"]) + (output_tokens / 1_000_000 * rates["output"])
+
+        record = {
+            "ts": datetime.now(IST).isoformat(),
+            "action": action or "unknown",
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": round(cost, 6),
+        }
+
+        filename = _ai_usage_log_filename(today_ist())
+        existing, sha = github_get(filename, site_token, timeout=8)
+        records = existing if isinstance(existing, list) else []
+        records.append(record)
+        github_put(filename, site_token, records, sha, f"AI call logged: {record['action']}", timeout=10)
+    except Exception:
+        pass  # logging is best-effort - never propagate
+
+
+def _caller_action_name():
+    # Walks up two frames: this helper -> call_gemini_structured/grounded's
+    # own frame -> whatever called THAT. Falls back gracefully if the stack
+    # is shallower than expected (shouldn't happen in practice here).
+    try:
+        stack = inspect.stack()
+        return stack[2].function if len(stack) > 2 else "unknown"
+    except Exception:
+        return "unknown"
 
 
 def send_telegram_to_all(bot_token, chat_id_config, text):
@@ -749,6 +829,10 @@ def call_gemini_structured(api_key, prompt, schema, max_tokens=600, timeout=15):
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = json.loads(resp.read().decode())
+    try:
+        log_ai_call(_caller_action_name(), GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+    except Exception:
+        pass
     raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw_text)
 
@@ -772,6 +856,10 @@ def call_gemini_grounded(api_key, prompt, max_tokens=1500):
     )
     with urllib.request.urlopen(req, timeout=25) as resp:
         result = json.loads(resp.read().decode())
+    try:
+        log_ai_call(_caller_action_name(), GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+    except Exception:
+        pass
 
     candidate = (result.get("candidates") or [{}])[0]
     parts = candidate.get("content", {}).get("parts", [])
@@ -6870,7 +6958,140 @@ Be genuinely useful and specific, not generic filler. If the terms given are too
     return jsonify({"ok": True, "result": result})
 
 
+AI_USAGE_ACTION_LABELS = {
+    # Human-readable labels for the auto-detected function names, used in
+    # the summary/Telegram output so it reads like a feature name instead
+    # of a raw Python function name. Anything not in this map just falls
+    # back to showing the raw name as-is - still useful, just less pretty.
+    "check_gold_bill": "Gold Bill Checker", "check_silver_bill": "Silver Bill Checker",
+    "check_diamond_bill": "Diamond Bill Checker", "gold_scheme_check": "Gold Scheme Reality Check",
+    "daily_scam_ed": "Scam Stories (daily)", "marketing_trick_daily": "Smart Shopper (daily)",
+    "ask_ai": "Ask Durga Bro", "pyq_analysis": "PYQ Topic Analysis",
+    "llb5_topic_index": "LLB5 Topic Index", "llb5_lecture": "LLB5 Lecture Generator",
+    "tender_scrutiny": "Tender Scrutiny (document)", "daily_legal_update": "Daily Legal Update",
+    "daily_quiz": "Daily Quiz", "daily_social_card": "Daily Social Card",
+    "daily_sc_digest": "Daily Supreme Court Digest",
+}
 
+
+def _ai_usage_load_days(n_days, site_token):
+    # Reads the last n_days of daily log files (today going backward).
+    # Missing files (a day with zero AI calls) are simply skipped, not an
+    # error - most days for a low-traffic site may well have none.
+    all_records = []
+    d = today_ist()
+    for _ in range(n_days):
+        fname = _ai_usage_log_filename(d)
+        try:
+            data, _ = github_get(fname, site_token, timeout=10)
+            if isinstance(data, list):
+                for r in data:
+                    r["_date"] = d.isoformat()
+                all_records.extend(data)
+        except Exception:
+            pass
+        d = d - timedelta(days=1)
+    return all_records
+
+
+def _ai_usage_summarize(records):
+    total_cost = sum(r.get("cost_usd", 0) for r in records)
+    total_calls = len(records)
+    total_input = sum(r.get("input_tokens", 0) for r in records)
+    total_output = sum(r.get("output_tokens", 0) for r in records)
+    by_action = {}
+    for r in records:
+        a = r.get("action", "unknown")
+        if a not in by_action:
+            by_action[a] = {"calls": 0, "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
+        by_action[a]["calls"] += 1
+        by_action[a]["cost_usd"] += r.get("cost_usd", 0)
+        by_action[a]["input_tokens"] += r.get("input_tokens", 0)
+        by_action[a]["output_tokens"] += r.get("output_tokens", 0)
+    for a in by_action:
+        by_action[a]["cost_usd"] = round(by_action[a]["cost_usd"], 4)
+        by_action[a]["label"] = AI_USAGE_ACTION_LABELS.get(a, a)
+    return {
+        "total_calls": total_calls, "total_cost_usd": round(total_cost, 4),
+        "total_input_tokens": total_input, "total_output_tokens": total_output,
+        "by_action": by_action,
+    }
+
+
+@app.route('/api/ai-usage-summary', methods=['GET'])
+def ai_usage_summary():
+    # Called by the admin page (any time) and by the daily Telegram cron
+    # (once/day). Forecast is a simple trailing-7-day daily average
+    # projected to a 30-day month - deliberately simple rather than a
+    # fitted trend line, since with a handful of features triggering calls
+    # somewhat irregularly, a more "sophisticated" model would just be
+    # fitting noise. Framed honestly as a rough estimate in the output,
+    # not a precise prediction.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "SITE_REPO_TOKEN not configured on this service."}), 500
+
+    send_to_telegram = request.args.get("telegram") == "1"
+
+    today_records = _ai_usage_load_days(1, site_token)
+    today_summary = _ai_usage_summarize(today_records)
+
+    last7_records = _ai_usage_load_days(7, site_token)
+    last7_summary = _ai_usage_summarize(last7_records)
+
+    days_with_data = len(set(r["_date"] for r in last7_records)) or 1
+    daily_avg_cost = last7_summary["total_cost_usd"] / max(days_with_data, 1)
+    forecast_30d = round(daily_avg_cost * 30, 2)
+
+    result = {
+        "ok": True,
+        "today": today_summary,
+        "last_7_days": last7_summary,
+        "forecast": {
+            "basis": f"trailing average over {days_with_data} day(s) with recorded activity in the last 7",
+            "avg_daily_cost_usd": round(daily_avg_cost, 4),
+            "forecast_30_day_cost_usd": forecast_30d,
+            "note": "Rough estimate from recent activity, not a guarantee - real usage varies day to day.",
+        },
+        "known_gap": "GEMINI_MODEL is currently pinned to the 'gemini-flash-lite-latest' alias, not a dated model name. If Google repoints this alias to a different/pricier model, logged costs here would silently understate the real bill until GEMINI_PRICING is updated to match. Pinning to an explicit model name is recommended.",
+    }
+
+    if send_to_telegram:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat_id_config = os.environ.get("TELEGRAM_CHAT_ID")
+        if bot_token and chat_id_config:
+            lines = [
+                f"📊 <b>AI Usage Summary — {today_ist().strftime('%d %b %Y')}</b>",
+                "",
+                f"<b>Today:</b> {today_summary['total_calls']} calls · ${today_summary['total_cost_usd']:.4f}",
+                f"<b>Last 7 days:</b> {last7_summary['total_calls']} calls · ${last7_summary['total_cost_usd']:.4f}",
+                "",
+                f"📈 <b>30-day forecast:</b> ~${forecast_30d:.2f} (based on recent daily average)",
+                "",
+                "<b>Today by feature:</b>",
+            ]
+            if today_summary["by_action"]:
+                sorted_actions = sorted(today_summary["by_action"].items(), key=lambda x: -x[1]["cost_usd"])
+                for action, data in sorted_actions[:10]:
+                    lines.append(f"• {data['label']}: {data['calls']} calls, ${data['cost_usd']:.4f}")
+            else:
+                lines.append("No AI calls logged today.")
+            lines.append("")
+            lines.append("⚠️ Model pinned via a '-latest' alias — costs are a best-effort estimate, see /api/ai-usage-summary for details.")
+            try:
+                send_telegram_to_all(bot_token, chat_id_config, "\n".join(lines))
+                result["telegram_sent"] = True
+            except Exception as e:
+                result["telegram_sent"] = False
+                result["telegram_error"] = str(e)[:300]
+        else:
+            result["telegram_sent"] = False
+            result["telegram_error"] = "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured."
+
+    return jsonify(result)
+
+
+@app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
         "/api/wall-of-fame", "/api/update-gold-rate", "/api/pulse",
@@ -6883,6 +7104,7 @@ def health():
         "/api/tender-scrutiny", "/api/tender-scrutiny-history", "/api/translate-gold-checks",
         "/api/youtube-flagged-comments", "/api/youtube-flagged-comment-action",
         "/api/ghmc-tender-watch", "/api/ghmc-tenders-list", "/api/ghmc-connectivity-test", "/api/gold-scheme-check",
+        "/api/ai-usage-summary",
     ]})
 
 
