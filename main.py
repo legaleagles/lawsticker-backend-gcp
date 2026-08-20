@@ -7027,6 +7027,9 @@ def ai_usage_summary():
     # somewhat irregularly, a more "sophisticated" model would just be
     # fitting noise. Framed honestly as a rough estimate in the output,
     # not a precise prediction.
+    if not check_tender_scrutiny_password(request.args.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect or missing password."}), 401
+
     site_token = os.environ.get("SITE_REPO_TOKEN")
     if not site_token:
         return jsonify({"ok": False, "error": "SITE_REPO_TOKEN not configured on this service."}), 500
