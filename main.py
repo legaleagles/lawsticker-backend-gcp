@@ -121,6 +121,7 @@ GEMINI_PRICING = {
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40},  # last known rate before this model was shut down by Google June 1, 2026 - see call_gemini_search, likely broken since then
     "gemini-2.5-flash-image": {"input": 0.30, "output": 30.00},  # output rate is a rough text-token proxy only - real image pricing is $30/1M image-output-tokens (~$0.039/image), not a clean per-request number this table can represent precisely
+    "grok-4-fast": {"input": 0.20, "output": 0.50},  # xAI, per-1M-token rate as of Aug 2026 - tool-call fees are added separately via extra_cost_usd, not represented here
 }
 
 
@@ -128,19 +129,22 @@ def _ai_usage_log_filename(date_obj):
     return f"ai-usage-log-{date_obj.isoformat()}.json"
 
 
-def log_ai_call(action, model, usage_metadata, site_token):
+def log_ai_call(action, model, usage_metadata, site_token, extra_cost_usd=0):
     # Never let logging break the actual feature that triggered it - any
     # failure here (GitHub API hiccup, SHA conflict, missing token) is
     # swallowed silently rather than raised, since usage tracking is
     # observability, not something a user-facing request should ever fail
     # because of.
+    # extra_cost_usd covers flat per-call fees that aren't token-based,
+    # e.g. Grok's $5/1,000 web_search or x_search tool-invocation fee -
+    # added on top of the token cost, not instead of it.
     if not site_token or not usage_metadata:
         return
     try:
         input_tokens = usage_metadata.get("promptTokenCount", 0) or 0
         output_tokens = usage_metadata.get("candidatesTokenCount", 0) or 0
         rates = GEMINI_PRICING.get(model, GEMINI_PRICING_FALLBACK)
-        cost = (input_tokens / 1_000_000 * rates["input"]) + (output_tokens / 1_000_000 * rates["output"])
+        cost = (input_tokens / 1_000_000 * rates["input"]) + (output_tokens / 1_000_000 * rates["output"]) + (extra_cost_usd or 0)
 
         record = {
             "ts": datetime.now(IST).isoformat(),
@@ -874,6 +878,86 @@ def call_gemini_grounded(api_key, prompt, max_tokens=1500):
         title = chunk.get("web", {}).get("title", "")
         if uri:
             source_urls.append({"uri": uri, "title": title})
+
+    return raw_text, source_urls
+
+
+# ---------------------------------------------------------------------------
+# Grok (xAI) search-grounded call - a genuine alternative to
+# call_gemini_grounded above, used specifically for Scam Stories' discovery
+# phase (the one place search grounding is actually required). Routes
+# through the current, non-deprecated /v1/responses endpoint with the
+# web_search + x_search tools - xAI's older "Live Search" API
+# (search_parameters) was deprecated Jan 12, 2026, so this deliberately
+# does NOT use that pattern.
+#
+# The exact raw JSON shape of /v1/responses isn't confirmed from available
+# docs (only SDK-wrapped examples were found, not the raw wire format), so
+# parsing here is deliberately defensive - it tries several reasonable
+# field-name variants for both the output text and token usage, and raises
+# a diagnosable error (naming which keys WERE present) rather than silently
+# returning nothing if none match. The caller (daily_scam_ed) falls back to
+# the proven call_gemini_grounded path on any failure here, so a parsing
+# miss on the very first real call degrades gracefully instead of breaking
+# the feature.
+# ---------------------------------------------------------------------------
+XAI_API_URL = "https://api.x.ai/v1/responses"
+XAI_SEARCH_MODEL = "grok-4-fast"
+XAI_TOOL_CALL_FEE_USD = 0.005  # $5 per 1,000 successful web_search/x_search tool calls, per xAI's published tool pricing - added on top of token cost, not a token-based estimate
+
+
+def call_grok_search(api_key, prompt, max_tokens=1500):
+    payload = json.dumps({
+        "model": XAI_SEARCH_MODEL,
+        "input": [{"role": "user", "content": prompt}],
+        "tools": [{"type": "web_search"}, {"type": "x_search"}],
+        "max_output_tokens": max_tokens,
+    }).encode()
+    req = urllib.request.Request(
+        XAI_API_URL, data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read().decode())
+
+    # --- Extract text: try the Responses-API convenience field first,
+    # then fall back to walking the output array for message content. ---
+    raw_text = result.get("output_text")
+    if not raw_text:
+        text_parts = []
+        for item in result.get("output", []):
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if c.get("type") in ("output_text", "text") and c.get("text"):
+                        text_parts.append(c["text"])
+        raw_text = "".join(text_parts)
+    if not raw_text:
+        raise ValueError(f"Could not find output text in Grok response - top-level keys were: {list(result.keys())}")
+
+    # --- Extract citations: look for url_citation annotations on message
+    # content, which is the OpenAI-Responses-API convention xAI mirrors. ---
+    source_urls = []
+    for item in result.get("output", []):
+        if item.get("type") == "message":
+            for c in item.get("content", []):
+                for ann in c.get("annotations", []) or []:
+                    if ann.get("type") == "url_citation" and ann.get("url"):
+                        source_urls.append({"uri": ann["url"], "title": ann.get("title", "")})
+
+    # --- Log cost: token usage (Responses API typically uses
+    # input_tokens/output_tokens rather than Gemini's promptTokenCount
+    # naming) plus the flat per-tool-call fee, since xAI bills those
+    # separately from tokens. ---
+    try:
+        usage = result.get("usage", {})
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+        tool_calls_made = sum(1 for item in result.get("output", []) if item.get("type") in ("web_search_call", "x_search_call"))
+        tool_fee = tool_calls_made * XAI_TOOL_CALL_FEE_USD
+        log_ai_call("daily_scam_ed_grok_search", XAI_SEARCH_MODEL, {"promptTokenCount": input_tokens, "candidatesTokenCount": output_tokens}, os.environ.get("SITE_REPO_TOKEN"), extra_cost_usd=tool_fee)
+    except Exception:
+        pass
 
     return raw_text, source_urls
 
@@ -5373,12 +5457,27 @@ def daily_scam_ed():
                 if dup.get("is_duplicate"):
                     continue
 
-            # Phase 1 — grounded search for a real, sourced case
+            # Phase 1 — grounded search for a real, sourced case. Tries Grok
+            # first (pilot - moves this call off Gemini's cap, and its
+            # X-search may surface scam reports that circulate on X before
+            # anywhere else), falling back to the proven Gemini path if
+            # Grok isn't configured or its call/response fails for any
+            # reason - this phase is a hard gate for the whole feature
+            # (no source, no publish), so it must not become less reliable
+            # than it was before this pilot.
             search_prompt = build_grounded_search_prompt(category, topic_label)
-            try:
-                grounded_text, source_urls = call_gemini_grounded(gemini_key, search_prompt)
-            except Exception:
-                continue
+            grounded_text, source_urls = None, None
+            xai_key = os.environ.get("XAI_API_KEY")
+            if xai_key:
+                try:
+                    grounded_text, source_urls = call_grok_search(xai_key, search_prompt)
+                except Exception:
+                    grounded_text, source_urls = None, None
+            if not grounded_text:
+                try:
+                    grounded_text, source_urls = call_gemini_grounded(gemini_key, search_prompt)
+                except Exception:
+                    continue
 
             if not grounded_text or "NO VERIFIABLE SOURCE FOUND" in grounded_text or not source_urls:
                 continue  # hard gate: no real source URL, no publish
@@ -7006,6 +7105,7 @@ AI_USAGE_ACTION_LABELS = {
     # of a raw Python function name. Anything not in this map just falls
     # back to showing the raw name as-is - still useful, just less pretty.
     "check_gold_bill": "Gold Bill Checker", "check_silver_bill": "Silver Bill Checker",
+    "daily_scam_ed_grok_search": "Scam Stories - Grok search (pilot)",
     "check_diamond_bill": "Diamond Bill Checker", "gold_scheme_check": "Gold Scheme Reality Check",
     "daily_scam_ed": "Scam Stories (daily)", "marketing_trick_daily": "Smart Shopper (daily)",
     "ask_ai": "Ask Durga Bro", "pyq_analysis": "PYQ Topic Analysis",
