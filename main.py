@@ -7464,6 +7464,22 @@ def ai_usage_summary():
     return jsonify(result)
 
 
+@app.route('/api/xai-key-diagnostic', methods=['GET'])
+def xai_key_diagnostic():
+    # Isolated check for exactly one thing: is XAI_API_KEY actually present
+    # on THIS running service, right now. Doesn't call the Grok API at all
+    # - just reports on the environment variable itself, to separate
+    # "key missing/misconfigured" from "key present but Grok call failing"
+    # as cleanly and fast as possible.
+    key = os.environ.get("XAI_API_KEY")
+    return jsonify({
+        "ok": True,
+        "xai_api_key_present": bool(key),
+        "xai_api_key_length": len(key) if key else 0,
+        "xai_api_key_prefix": (key[:6] + "...") if key else None,
+    })
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
