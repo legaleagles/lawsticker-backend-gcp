@@ -2710,6 +2710,205 @@ def check_diamond_bill():
 
     return jsonify({"ok": True, "extracted": extracted, "checks": checks, "diamond_price_check": diamond_price_check, "today_gold_rate": today_gold_rate})
 
+
+# ---------------------------------------------------------------------------
+# Restaurant Bill Checker — deliberately scoped to exactly two checkable
+# things, per explicit decision: whether menu items are fairly priced is
+# NOT something this can verify (no pricing database exists for that), so
+# it doesn't try. What IS reliably checkable straight from a printed bill,
+# with no live external data needed at all:
+#
+# 1. Service charge legality - CCPA's 2022 guidelines require it to be
+#    genuinely voluntary, never automatic/mandatory - checked by looking
+#    for actual "voluntary" disclosure language near the charge.
+# 2. GST rate correctness - standalone restaurants are capped at 5% GST by
+#    law; 18% is only valid for a restaurant genuinely operating inside a
+#    hotel with room tariffs above Rs 7,500/night. Framed as "worth
+#    confirming" rather than a flat accusation, since a photo alone can't
+#    100% prove a restaurant isn't hotel-attached - same calibrated,
+#    non-overclaiming tone as the rest of the site's checkers.
+#
+# Fully deterministic - one vision-extraction call, then pure Python rule
+# checks, no second AI call needed for interpretation (cheaper and more
+# reliable than the multi-call gold/diamond pattern, since nothing here
+# requires judgment calls an LLM would need to make).
+# ---------------------------------------------------------------------------
+
+RESTAURANT_BILL_EXTRACT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "restaurant_name": {"type": "STRING"},
+        "restaurant_address_context": {"type": "STRING", "description": "Any address/context printed on the bill that indicates whether this is a standalone restaurant or one operating inside a hotel (e.g. hotel name, 'Hotel XYZ', floor/room references) - empty if nothing on the bill suggests either way"},
+        "bill_date": {"type": "STRING"},
+        "subtotal": {"type": "NUMBER", "description": "sum of food/item prices before any charges or tax"},
+        "service_charge_amount": {"type": "NUMBER", "description": "0 if no service charge line exists on this bill"},
+        "service_charge_percent": {"type": "NUMBER"},
+        "service_charge_label_text": {"type": "STRING", "description": "the exact text printed next to/describing the service charge line, verbatim - e.g. 'Service Charge', 'Service Charge (Voluntary)', 'Service Charge @10%' - empty if no service charge line"},
+        "cgst_amount": {"type": "NUMBER"},
+        "sgst_amount": {"type": "NUMBER"},
+        "gst_percent_stated": {"type": "NUMBER", "description": "the total GST percentage as printed (CGST% + SGST% combined), e.g. 5 or 18"},
+        "gst_taxable_value": {"type": "NUMBER", "description": "the amount GST was calculated on (the taxable/base value), if shown separately from subtotal"},
+        "legacy_service_tax_amount": {"type": "NUMBER", "description": "an old-format 'Service Tax' line shown SEPARATELY from GST, if present - 0 if not present. Service Tax was abolished when GST replaced it in July 2017, so a bill still showing this alongside GST is using a stale/incorrect billing format"},
+        "final_amount": {"type": "NUMBER"},
+    },
+    "required": ["subtotal", "final_amount"]
+}
+
+
+def build_restaurant_bill_extract_prompt():
+    return """This is a photographed restaurant/food bill or receipt.
+
+Extract every field genuinely printed on THIS bill. Never invent or guess a number that isn't actually shown - leave it 0 or empty instead.
+
+Pay close attention to:
+- The EXACT verbatim text printed next to any service charge line (e.g. does it say "voluntary" or "optional" anywhere, or is it presented as a plain mandatory charge?) - this exact wording matters a lot, don't paraphrase it.
+- Whether CGST and SGST are shown as two separate lines (typical) or just one combined "GST" line - if separate, extract both individually.
+- Any indication anywhere on the bill of whether this is a standalone restaurant or one located inside a hotel (hotel name, hotel branding, room-service references) - leave this empty if the bill gives no indication either way, don't guess.
+- Whether there's an old-style "Service Tax" line shown separately from GST (this would be an outdated format, worth noting precisely).
+
+Accuracy matters more than completeness - this is being used to check the bill's arithmetic and whether legally-required charge disclosures were actually made."""
+
+
+def compute_restaurant_checks(extracted):
+    checks = []
+
+    # --- Check 1: Service charge legality (CCPA 2022 guidelines) ---
+    sc_amount = extracted.get("service_charge_amount") or 0
+    if sc_amount > 0:
+        label = (extracted.get("service_charge_label_text") or "").lower()
+        if "voluntary" in label or "optional" in label:
+            checks.append({
+                "status": "ok", "title": "Service charge is disclosed as voluntary",
+                "detail": f"The bill's own wording (\"{extracted.get('service_charge_label_text')}\") states this is voluntary, matching CCPA's 2022 guidelines - you're within your rights to have it removed if you don't wish to pay it, but this bill itself is disclosing it correctly.",
+            })
+        else:
+            checks.append({
+                "status": "warn", "title": "Service charge is not disclosed as voluntary",
+                "detail": f"This bill charges a service charge (₹{round(sc_amount):,}) without stating it's voluntary. Per the Central Consumer Protection Authority's 2022 guidelines, restaurants cannot levy service charge as automatic or mandatory - it must be entirely your choice. You can ask for it to be removed, and a restaurant refusing to do so may be violating these guidelines.",
+            })
+
+    # --- Check 2: GST rate correctness for restaurant type ---
+    gst_pct = extracted.get("gst_percent_stated") or 0
+    address_context = (extracted.get("restaurant_address_context") or "").lower()
+    hotel_indicated = any(k in address_context for k in ["hotel", "resort", "inn"])
+    if gst_pct:
+        if 4.5 <= gst_pct <= 5.5:
+            checks.append({
+                "status": "ok", "title": f"GST rate ({gst_pct}%) matches the standard restaurant rate",
+                "detail": "Standalone restaurants are capped at 5% GST by law (with no input tax credit) - this bill's rate matches that.",
+            })
+        elif 17 <= gst_pct <= 19:
+            if hotel_indicated:
+                checks.append({
+                    "status": "info", "title": f"GST rate is {gst_pct}% - only valid if this hotel's room tariff genuinely exceeds ₹7,500/night",
+                    "detail": "The bill shows a hotel context, which is the one legitimate reason a restaurant can charge 18% GST instead of the standard 5% - but this only applies if the hotel's room tariff actually exceeds ₹7,500/night. Worth confirming that's genuinely the case here.",
+                })
+            else:
+                checks.append({
+                    "status": "warn", "title": f"GST rate is {gst_pct}%, worth confirming with the restaurant",
+                    "detail": "Standalone restaurants are legally capped at 5% GST. The 18% rate only applies to a restaurant genuinely operating inside a hotel charging room tariffs above ₹7,500/night - nothing on this bill indicates that's the case here. This is common enough that it's worth asking the restaurant directly why 18% was charged, rather than assuming it's wrong outright - a photo alone can't fully confirm their registration category.",
+                })
+        else:
+            checks.append({
+                "status": "info", "title": f"GST rate shown is {gst_pct}%, an unusual rate for a restaurant bill",
+                "detail": "Restaurant GST is normally either 5% (standard) or 18% (hotel-attached, above ₹7,500/night tariff only) - this doesn't match either, worth double-checking with the restaurant.",
+            })
+
+        # CGST/SGST split arithmetic
+        cgst = extracted.get("cgst_amount") or 0
+        sgst = extracted.get("sgst_amount") or 0
+        if cgst > 0 and sgst > 0:
+            diff_pct = abs(cgst - sgst) / max(cgst, sgst) * 100
+            if diff_pct > 5:
+                checks.append({
+                    "status": "warn", "title": "CGST and SGST amounts aren't an even split",
+                    "detail": f"CGST ₹{cgst:,.2f} and SGST ₹{sgst:,.2f} should normally be an exact even split of the total GST for a standard dine-in bill - this unevenness is worth asking about, as it can indicate a billing software error or an inflated total.",
+                })
+
+    # --- Check 3: legacy Service Tax (abolished 2017) still being charged ---
+    legacy_tax = extracted.get("legacy_service_tax_amount") or 0
+    if legacy_tax > 0:
+        checks.append({
+            "status": "warn", "title": "Bill shows a separate 'Service Tax' line alongside GST",
+            "detail": f"Service Tax (₹{round(legacy_tax):,} shown here) was abolished when GST replaced it in July 2017. A bill still charging this as a separate line, on top of GST, is using an outdated - and likely incorrect - billing format.",
+        })
+
+    # --- Check 4: overall arithmetic ---
+    try:
+        subtotal = extracted.get("subtotal") or 0
+        total_gst = (extracted.get("cgst_amount") or 0) + (extracted.get("sgst_amount") or 0)
+        final = extracted.get("final_amount") or 0
+        computed = subtotal + sc_amount + total_gst + legacy_tax
+        if final > 0 and subtotal > 0:
+            diff_pct = abs(computed - final) / final * 100
+            if diff_pct < 1.5:
+                checks.append({"status": "ok", "title": "Arithmetic checks out",
+                                "detail": "Subtotal + service charge + GST adds up to the final amount printed."})
+            else:
+                checks.append({"status": "warn", "title": "The printed total doesn't quite match the line items",
+                                "detail": f"Adding up the individual lines gives ₹{round(computed):,}, but the bill's final amount is ₹{round(final):,} — worth asking the restaurant to explain the difference."})
+    except Exception:
+        pass
+
+    return checks
+
+
+@app.route('/api/check-restaurant-bill', methods=['POST'])
+def check_restaurant_bill():
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    image_base64 = body.get("image_base64")
+    image_mime = body.get("image_mime", "image/jpeg")
+    lang = body.get("lang", "en")
+    if not image_base64:
+        return jsonify({"ok": False, "error": "image_base64 is required."}), 400
+
+    try:
+        parts = [
+            {"text": build_restaurant_bill_extract_prompt()},
+            {"inline_data": {"mime_type": image_mime, "data": image_base64}},
+        ]
+        payload = json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "maxOutputTokens": 2000,
+                "responseMimeType": "application/json",
+                "responseSchema": RESTAURANT_BILL_EXTRACT_SCHEMA,
+            },
+        }).encode()
+        req = urllib.request.Request(
+            f"{GEMINI_URL}?key={gemini_key}",
+            data=payload, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("check_restaurant_bill", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
+        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        extracted = json.loads(raw_text)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this bill: {str(e)[:300]}"}), 502
+
+    checks = compute_restaurant_checks(extracted)
+
+    if lang in ("te", "hi") and checks:
+        texts = []
+        for c in checks:
+            texts.append(c["title"])
+            texts.append(c["detail"])
+        translated = translate_texts_for_gold_bill(texts, lang, gemini_key)
+        if translated != texts:
+            for i, c in enumerate(checks):
+                c["title"] = translated[i * 2]
+                c["detail"] = translated[i * 2 + 1]
+
+    return jsonify({"ok": True, "extracted": extracted, "checks": checks})
+
 # ---------------------------------------------------------------------------
 # Today's Legal Update — replaces the old generic news-ticker (which pulled
 # irrelevant global wire stories and had a broken/never-scheduled refresh
