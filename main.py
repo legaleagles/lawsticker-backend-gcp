@@ -7514,6 +7514,20 @@ def xai_key_diagnostic():
     })
 
 
+@app.route('/api/vehicle-check-auth', methods=['POST'])
+def vehicle_check_auth():
+    # Minimal auth check for the personal-use Vehicle Compliance Check page
+    # (Durga + Sreekanth only, unlinked from site navigation). This page has
+    # no server-side data logic of its own - it's a guided set of deep links
+    # to the official government portals, since both echallan.parivahan.gov.in
+    # (CAPTCHA) and vahan.parivahan.gov.in (OTP login) deliberately require a
+    # human in the loop and can't be scraped/automated behind this page.
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+    return jsonify({"ok": True})
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
