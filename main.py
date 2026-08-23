@@ -7631,6 +7631,45 @@ def daily_x_pulse():
     return jsonify({"ok": True, "record": record})
 
 
+X_PULSE_VOTES_FILE = "x-pulse-votes.json"
+
+
+@app.route('/api/x-pulse-vote', methods=['POST'])
+def x_pulse_vote():
+    # Simple engagement signal, not a public metric display - this exists
+    # so real usage data (not a guess) informs whether X Pulse is worth
+    # continuing to spend Grok credits on. One vote per device per day is
+    # enforced client-side via localStorage (not perfectly foolproof, but
+    # reasonable for a low-stakes feedback signal, not a poll needing
+    # fraud-proofing).
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    date = body.get("date", "")
+    vote = body.get("vote", "")
+    if vote not in ("like", "dislike") or not date:
+        return jsonify({"ok": False, "error": "vote must be 'like' or 'dislike', date is required."}), 400
+
+    try:
+        existing, sha = github_get(X_PULSE_VOTES_FILE, site_token, timeout=8)
+    except Exception:
+        existing, sha = None, None
+    votes = existing if isinstance(existing, dict) else {}
+    day_votes = votes.get(date, {"like": 0, "dislike": 0})
+    day_votes[vote] = day_votes.get(vote, 0) + 1
+    votes[date] = day_votes
+
+    try:
+        github_put(X_PULSE_VOTES_FILE, site_token, votes, sha, f"X Pulse vote: {vote} on {date}", timeout=10)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+
+    return jsonify({"ok": True, "day_votes": day_votes})
+
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
