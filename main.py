@@ -1009,14 +1009,19 @@ def call_grok_x_sentiment(api_key, prompt, max_tokens=600):
     return raw_text.strip()
 
 
-X_PULSE_SCHEMA_HINT = """Respond in exactly this format, nothing else:
+X_PULSE_SCHEMA_HINT = """Respond in EXACTLY this format, one line each, nothing before or after:
 
+TOPIC: [the single most-discussed topic on X in India right now - can be politics, policy, a scam/consumer issue, sports, or any genuinely trending subject. Pick whatever the data actually shows is dominant - do not default to scams/consumer topics just because that's this site's usual focus.]
 VOLUME: [Low / Moderate / High]
-SUMMARY: [2-3 plain sentences on what's actually being discussed - real specifics, not vague generalities. If genuinely nothing notable is being discussed today, say so plainly rather than inventing something.]"""
+EST_POSTS: [a rough range describing how much discussion you actually observed, e.g. "roughly 40-100 posts" - this is your own estimate from what you searched, not an exact platform count, so phrase it as an estimate]
+SENTIMENT: [approximate breakdown of tone as percentages that sum to 100, e.g. "50% critical, 30% supportive, 20% mixed/neutral" - base this only on what you actually observed, not assumptions]
+SUMMARY: [3-4 sentences on what's actually being said, in your own words - real specifics (who/what/why), not vague generalities. If genuinely nothing notable is trending, say so plainly rather than inventing something.]
+
+CRITICAL RULE IF THE TOPIC IS POLITICAL OR POLICY-RELATED: report ONLY what different sides are actually posting, described neutrally and factually. Present every notable viewpoint found in the data fairly. NEVER state or imply which side is correct, never inject your own opinion, and never let one side's framing dominate the summary just because it was more numerous or more visible in search results. If sentiment is genuinely split, say so explicitly and describe each side's actual framing in their own terms."""
 
 
 def build_x_pulse_prompt():
-    return f"""Search X (Twitter) for what's currently being discussed by people in India today about: scams, fraud warnings, and consumer complaints against companies/apps.
+    return f"""Search X (Twitter) for what's genuinely most being discussed by people in India right now - this can be politics, government policy, a scam/consumer issue, sports, or any other topic that's actually trending today. Do not force it to be about scams specifically - report whatever the real data shows is dominant.
 
 Give an honest read of the actual current volume and tone - don't manufacture urgency or find a "trend" if there genuinely isn't a notable one today.
 
@@ -1024,15 +1029,36 @@ Give an honest read of the actual current volume and tone - don't manufacture ur
 
 
 def parse_x_pulse_response(raw_text):
-    volume = "Unknown"
-    summary = raw_text
+    result = {"topic": "", "volume": "Unknown", "est_posts": "", "sentiment": "", "summary": raw_text}
     for line in raw_text.splitlines():
         line = line.strip()
-        if line.upper().startswith("VOLUME:"):
-            volume = line.split(":", 1)[1].strip()
+        if line.upper().startswith("TOPIC:"):
+            result["topic"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("VOLUME:"):
+            result["volume"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("EST_POSTS:"):
+            result["est_posts"] = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("SENTIMENT:"):
+            result["sentiment"] = line.split(":", 1)[1].strip()
         elif line.upper().startswith("SUMMARY:"):
-            summary = line.split(":", 1)[1].strip()
-    return {"volume": volume, "summary": summary}
+            result["summary"] = line.split(":", 1)[1].strip()
+    return result
+
+
+def parse_sentiment_breakdown(sentiment_str):
+    # Turns "50% critical, 30% supportive, 20% mixed/neutral" into a list of
+    # {label, pct} dicts for rendering as a simple bar - falls back to an
+    # empty list (frontend just skips the bar) if the format doesn't parse
+    # cleanly, since this is a display nicety, not something to error over.
+    import re as _re
+    parts = []
+    for chunk in sentiment_str.split(","):
+        m = _re.search(r"(\d{1,3})\s*%\s*([a-zA-Z/\- ]+)", chunk)
+        if m:
+            pct = min(100, int(m.group(1)))
+            label = m.group(2).strip().title()
+            parts.append({"label": label, "pct": pct})
+    return parts
 
 
 def build_grounded_search_prompt(category, topic_label):
@@ -7587,7 +7613,11 @@ def daily_x_pulse():
     record = {
         "date": today_ist().isoformat(),
         "generated_at": datetime.now(IST).isoformat(),
+        "topic": parsed["topic"],
         "volume": parsed["volume"],
+        "est_posts": parsed["est_posts"],
+        "sentiment": parsed["sentiment"],
+        "sentiment_breakdown": parse_sentiment_breakdown(parsed["sentiment"]),
         "summary": parsed["summary"],
         "model": XAI_SEARCH_MODEL,
     }
