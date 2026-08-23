@@ -902,7 +902,7 @@ def call_gemini_grounded(api_key, prompt, max_tokens=1500):
 # the feature.
 # ---------------------------------------------------------------------------
 XAI_API_URL = "https://api.x.ai/v1/responses"
-XAI_SEARCH_MODEL = "grok-4-fast"
+XAI_SEARCH_MODEL = "grok-4.3"  # grok-4-fast (used previously) was retired May 15 2026 and silently redirected to this same model - using the real current name directly instead of relying on a redirect that could break again
 XAI_TOOL_CALL_FEE_USD = 0.005  # $5 per 1,000 successful web_search/x_search tool calls, per xAI's published tool pricing - added on top of token cost, not a token-based estimate
 
 
@@ -960,6 +960,79 @@ def call_grok_search(api_key, prompt, max_tokens=1500):
         pass
 
     return raw_text, source_urls
+
+
+def call_grok_x_sentiment(api_key, prompt, max_tokens=600):
+    # Deliberately simpler than call_grok_search above: no citation
+    # requirement, no hard gate on results, since sentiment is inherently
+    # an aggregate impression rather than a single sourced fact. This
+    # avoids the exact failure mode from the Scam Stories pilot (a strict
+    # citation-parsing gate that silently produced zero results for days).
+    # If this fails, the caller just skips showing the card that day - low
+    # stakes by design.
+    payload = json.dumps({
+        "model": XAI_SEARCH_MODEL,
+        "input": [{"role": "user", "content": prompt}],
+        "tools": [{"type": "x_search"}],
+        "max_output_tokens": max_tokens,
+    }).encode()
+    req = urllib.request.Request(
+        XAI_API_URL, data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read().decode())
+
+    raw_text = result.get("output_text")
+    if not raw_text:
+        text_parts = []
+        for item in result.get("output", []):
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if c.get("type") in ("output_text", "text") and c.get("text"):
+                        text_parts.append(c["text"])
+        raw_text = "".join(text_parts)
+    if not raw_text:
+        raise ValueError(f"Could not find output text in Grok response - top-level keys were: {list(result.keys())}")
+
+    try:
+        usage = result.get("usage", {})
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+        tool_calls_made = sum(1 for item in result.get("output", []) if item.get("type") in ("web_search_call", "x_search_call"))
+        tool_fee = tool_calls_made * XAI_TOOL_CALL_FEE_USD
+        log_ai_call("daily_x_pulse", XAI_SEARCH_MODEL, {"promptTokenCount": input_tokens, "candidatesTokenCount": output_tokens}, os.environ.get("SITE_REPO_TOKEN"), extra_cost_usd=tool_fee)
+    except Exception:
+        pass
+
+    return raw_text.strip()
+
+
+X_PULSE_SCHEMA_HINT = """Respond in exactly this format, nothing else:
+
+VOLUME: [Low / Moderate / High]
+SUMMARY: [2-3 plain sentences on what's actually being discussed - real specifics, not vague generalities. If genuinely nothing notable is being discussed today, say so plainly rather than inventing something.]"""
+
+
+def build_x_pulse_prompt():
+    return f"""Search X (Twitter) for what's currently being discussed by people in India today about: scams, fraud warnings, and consumer complaints against companies/apps.
+
+Give an honest read of the actual current volume and tone - don't manufacture urgency or find a "trend" if there genuinely isn't a notable one today.
+
+{X_PULSE_SCHEMA_HINT}"""
+
+
+def parse_x_pulse_response(raw_text):
+    volume = "Unknown"
+    summary = raw_text
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if line.upper().startswith("VOLUME:"):
+            volume = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("SUMMARY:"):
+            summary = line.split(":", 1)[1].strip()
+    return {"volume": volume, "summary": summary}
 
 
 def build_grounded_search_prompt(category, topic_label):
@@ -7488,6 +7561,44 @@ def vehicle_check_auth():
     if not check_tender_scrutiny_password(body.get("password", "")):
         return jsonify({"ok": False, "error": "Incorrect password."}), 401
     return jsonify({"ok": True})
+
+
+X_PULSE_FILE = "x-pulse.json"
+
+
+@app.route('/api/daily-x-pulse', methods=['GET'])
+def daily_x_pulse():
+    # Standalone, low-stakes companion to Scam Stories - genuinely uses
+    # Grok's one differentiated strength (live X search) rather than
+    # repeating the citation-gated pattern that failed silently before.
+    # No hard gate: if this fails for any reason, the card just doesn't
+    # update that day - nothing else on the site depends on this succeeding.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    xai_key = os.environ.get("XAI_API_KEY")
+    if not site_token or not xai_key:
+        return jsonify({"ok": False, "error": "SITE_REPO_TOKEN or XAI_API_KEY not configured."}), 500
+
+    try:
+        raw_text = call_grok_x_sentiment(xai_key, build_x_pulse_prompt())
+        parsed = parse_x_pulse_response(raw_text)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:400]}), 502
+
+    record = {
+        "date": today_ist().isoformat(),
+        "generated_at": datetime.now(IST).isoformat(),
+        "volume": parsed["volume"],
+        "summary": parsed["summary"],
+        "model": XAI_SEARCH_MODEL,
+    }
+
+    try:
+        existing, sha = github_get(X_PULSE_FILE, site_token, timeout=8)
+    except Exception:
+        existing, sha = None, None
+    github_put(X_PULSE_FILE, site_token, record, sha, f"X Pulse update {record['date']}", timeout=10)
+
+    return jsonify({"ok": True, "record": record})
 
 
 @app.route('/', methods=['GET'])
