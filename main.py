@@ -5638,8 +5638,6 @@ def daily_scam_ed():
         generated = []   # list of (entry_dict, ref_number)
         used_topics = set()
         ts_base = int(datetime.now(timezone.utc).timestamp())
-        grok_errors = []  # real failure reasons, surfaced in the response instead of silently swallowed - this is exactly what was missing when a revoked/stale key silently produced "no source found" for days with zero visibility into why
-        grok_attempts_debug = []  # per-attempt detail even on the NON-exception path - distinguishes "Grok genuinely said no source" from "Grok returned text but citation parsing found zero sources", which looked identical before this
 
         # A few spare tries: some topics won't have a findable real source,
         # some will turn out duplicate — both just move to the next topic.
@@ -5658,38 +5656,20 @@ def daily_scam_ed():
                 if dup.get("is_duplicate"):
                     continue
 
-            # Phase 1 — grounded search for a real, sourced case. Grok only
-            # for this step (pilot) - deliberately no Gemini fallback here.
-            # Falling back would mean every Grok failure quietly burns a
-            # Gemini call anyway, defeating the point of paying for Grok
-            # credits specifically to keep this load off Gemini. If Grok
-            # isn't configured or its call/response fails, this topic
-            # attempt is simply skipped (same as the other skip conditions
-            # already in this loop) - but the REAL reason is now captured
-            # and surfaced in the response, not silently swallowed. A bare
-            # except-continue here previously made an auth failure (e.g. a
-            # stale/revoked key) look identical to "genuinely found no
-            # source today" - indistinguishable without this.
+            # Phase 1 — grounded search for a real, sourced case. Back to
+            # Gemini directly - the Grok pilot never once produced a
+            # successful discovery since going live (zero real Grok calls
+            # logged across multiple days), so it's pulled from this
+            # pipeline entirely rather than spending further time
+            # diagnosing why. Grok/XAI_API_KEY stays available on this
+            # service for a different use case later if wanted.
             search_prompt = build_grounded_search_prompt(category, topic_label)
-            xai_key = os.environ.get("XAI_API_KEY")
-            if not xai_key:
-                grok_errors.append({"topic": topic_label, "error": "XAI_API_KEY not configured on this service"})
-                continue
             try:
-                grounded_text, source_urls = call_grok_search(xai_key, search_prompt)
-            except Exception as e:
-                grok_errors.append({"topic": topic_label, "error": str(e)[:300]})
+                grounded_text, source_urls = call_gemini_grounded(gemini_key, search_prompt)
+            except Exception:
                 continue
 
             if not grounded_text or "NO VERIFIABLE SOURCE FOUND" in grounded_text or not source_urls:
-                grok_attempts_debug.append({
-                    "topic": topic_label,
-                    "got_text": bool(grounded_text),
-                    "text_length": len(grounded_text) if grounded_text else 0,
-                    "said_no_source_explicitly": bool(grounded_text) and "NO VERIFIABLE SOURCE FOUND" in grounded_text,
-                    "source_url_count": len(source_urls) if source_urls else 0,
-                    "text_preview": (grounded_text[:200] if grounded_text else None),
-                })
                 continue  # hard gate: no real source URL, no publish
 
             best_source = source_urls[0]
@@ -5752,26 +5732,8 @@ def daily_scam_ed():
             generated.append((entry, ref_number))
 
         if not generated:
-            # If topics were skipped specifically due to real Grok errors
-            # (not just "genuinely no source today"), alert proactively -
-            # this exact silent-failure gap (a stale key producing this
-            # same skip response for days with zero visibility) is what
-            # took multiple rounds of manual diagnosis to catch before.
-            if grok_errors and bot_token and chat_id:
-                try:
-                    sample = grok_errors[0]["error"]
-                    msg = (f"⚠️ <b>Scam Stories: nothing published today</b>\n\n"
-                           f"{len(grok_errors)} topic attempt(s) failed with a real error (not just 'no source found'):\n"
-                           f"<code>{sample[:200]}</code>\n\n"
-                           f"Check /api/xai-key-diagnostic if this looks like an auth/key issue.")
-                    for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
-                        send_telegram(bot_token, cid, msg)
-                except Exception:
-                    pass
             return jsonify({"ok": True, "skipped": True,
-                            "reason": "No topic today had a verifiable real source.",
-                            "grok_errors": grok_errors or None,
-                            "grok_attempts_debug": grok_attempts_debug or None})
+                            "reason": "No topic today had a verifiable real source."})
 
         public_data["entries"] = public_entries[-1000:]
         github_put(PUBLIC_FILE, site_token, public_data, public_sha,
