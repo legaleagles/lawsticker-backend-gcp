@@ -7810,15 +7810,23 @@ def batch_meet_directory():
             "yes": sum(1 for e in entries if e.get("rsvp") == "yes"),
             "no": sum(1 for e in entries if e.get("rsvp") == "no"),
             "maybe": sum(1 for e in entries if e.get("rsvp") == "maybe"),
+            "veg": sum(1 for e in entries if e.get("rsvp") == "yes" and e.get("food_pref") == "veg"),
+            "non_veg": sum(1 for e in entries if e.get("rsvp") == "yes" and e.get("food_pref") == "non-veg"),
         }
         return jsonify({"ok": True, "entries": entries, "summary": summary})
 
     body = request.get_json(force=True, silent=True) or {}
     name = _clean_str(body.get("name"), 100)
     phone = _clean_str(body.get("phone"), 20)
+    roll_number = _clean_str(body.get("roll_number"), 30)
+    food_pref = body.get("food_pref") if body.get("food_pref") in ("veg", "non-veg") else None
     rsvp = body.get("rsvp") if body.get("rsvp") in ("yes", "no", "maybe") else "maybe"
     if not name or not phone or not _valid_phone(phone):
         return jsonify({"ok": False, "error": "A valid name and phone number are required."}), 400
+    if not roll_number:
+        return jsonify({"ok": False, "error": "Roll number is required."}), 400
+    if not food_pref:
+        return jsonify({"ok": False, "error": "Please select a food preference (Veg / Non-Veg)."}), 400
 
     def update(existing):
         data = existing if isinstance(existing, dict) else {"entries": []}
@@ -7830,9 +7838,12 @@ def batch_meet_directory():
             if e.get("phone") == phone:
                 e["name"] = name
                 e["rsvp"] = rsvp
+                e["roll_number"] = roll_number
+                e["food_pref"] = food_pref
                 e["updated_at"] = datetime.now(IST).isoformat()
                 return {"entries": entries}
-        entries.append({"name": name, "phone": phone, "rsvp": rsvp, "added_at": datetime.now(IST).isoformat()})
+        entries.append({"name": name, "phone": phone, "rsvp": rsvp, "roll_number": roll_number,
+                        "food_pref": food_pref, "added_at": datetime.now(IST).isoformat()})
         return {"entries": entries}
 
     try:
