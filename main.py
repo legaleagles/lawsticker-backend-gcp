@@ -7930,10 +7930,19 @@ def batch_meet_ledger():
                 e["paid_at"] = datetime.now(IST).isoformat()
                 if receipt_url:
                     e["receipt_url"] = receipt_url
+                # Persist the flag (or clear it, if this resubmission's
+                # receipt now checks out fine) so the Audit team can see it
+                # later - not just at the moment of submission.
+                if receipt_warning:
+                    e["receipt_flag"] = receipt_warning
+                elif "receipt_flag" in e:
+                    del e["receipt_flag"]
                 return {"per_head_amount": data.get("per_head_amount", 0), "entries": entries}
         new_entry = {"name": name, "phone": phone, "amount_paid": amount_paid, "paid_at": datetime.now(IST).isoformat()}
         if receipt_url:
             new_entry["receipt_url"] = receipt_url
+        if receipt_warning:
+            new_entry["receipt_flag"] = receipt_warning
         entries.append(new_entry)
         return {"per_head_amount": data.get("per_head_amount", 0), "entries": entries}
 
