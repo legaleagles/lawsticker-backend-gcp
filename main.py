@@ -82,6 +82,26 @@ def github_put(path, token, content_obj, sha, message, timeout=15):
         return resp.status
 
 
+def github_get_put_with_retry(path, token, update_fn, message, max_retries=4):
+    # Read-modify-write with retry on conflict - genuinely matters here in a
+    # way it hasn't for other features this session: with ~150 people
+    # potentially submitting around the same time (e.g. right after an
+    # announcement goes out), a plain get-then-put risks a stale SHA
+    # silently failing and dropping someone's RSVP or payment update. On
+    # each retry, re-fetches fresh data so no update is ever lost.
+    for attempt in range(max_retries):
+        existing, sha = github_get(path, token, timeout=10)
+        new_data = update_fn(existing)
+        try:
+            github_put(path, token, new_data, sha, message, timeout=10)
+            return new_data
+        except urllib.error.HTTPError as e:
+            if e.code in (409, 422) and attempt < max_retries - 1:
+                continue  # someone else wrote in between - refetch and reapply
+            raise
+    raise Exception("Could not save after multiple retries - please try again.")
+
+
 def send_telegram(bot_token, chat_id, text):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
@@ -7683,6 +7703,213 @@ def x_pulse_vote():
 
     return jsonify({"ok": True, "day_votes": day_votes})
 
+
+
+# ---------------------------------------------------------------------------
+# Batch Get-Together module - deliberately separate from every other data
+# file/route prefix on the site (batch-meet-*.json, /api/batch-meet/*), per
+# explicit instruction to keep this module and its sub-pages fully separate
+# from the main site. No login by design (open to the whole batch, ~150
+# people) - the safeguards instead are: no delete endpoint exposed at all
+# (removes the worst vandalism vector outright), basic input validation,
+# and phone-number-as-identity so resubmitting only updates your own row
+# rather than creating duplicates.
+# ---------------------------------------------------------------------------
+BATCH_DIRECTORY_FILE = "batch-meet-directory.json"
+BATCH_LEDGER_FILE = "batch-meet-ledger.json"
+BATCH_TASKS_FILE = "batch-meet-tasks.json"
+
+
+def _clean_str(val, max_len=200):
+    return str(val or "").strip()[:max_len]
+
+
+def _valid_phone(phone):
+    digits = "".join(c for c in phone if c.isdigit())
+    return 7 <= len(digits) <= 15
+
+
+@app.route('/api/batch-meet/directory', methods=['GET', 'POST'])
+def batch_meet_directory():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    if request.method == 'GET':
+        data, _ = github_get(BATCH_DIRECTORY_FILE, site_token, timeout=10)
+        entries = (data or {}).get("entries", [])
+        summary = {
+            "total": len(entries),
+            "yes": sum(1 for e in entries if e.get("rsvp") == "yes"),
+            "no": sum(1 for e in entries if e.get("rsvp") == "no"),
+            "maybe": sum(1 for e in entries if e.get("rsvp") == "maybe"),
+        }
+        return jsonify({"ok": True, "entries": entries, "summary": summary})
+
+    body = request.get_json(force=True, silent=True) or {}
+    name = _clean_str(body.get("name"), 100)
+    phone = _clean_str(body.get("phone"), 20)
+    rsvp = body.get("rsvp") if body.get("rsvp") in ("yes", "no", "maybe") else "maybe"
+    if not name or not phone or not _valid_phone(phone):
+        return jsonify({"ok": False, "error": "A valid name and phone number are required."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"entries": []}
+        entries = data.get("entries", [])
+        # Phone number is the natural dedup key here, given there's no login -
+        # resubmitting with the same phone updates your own existing row
+        # (e.g. changing RSVP from maybe to yes) instead of creating a duplicate.
+        for e in entries:
+            if e.get("phone") == phone:
+                e["name"] = name
+                e["rsvp"] = rsvp
+                e["updated_at"] = datetime.now(IST).isoformat()
+                return {"entries": entries}
+        entries.append({"name": name, "phone": phone, "rsvp": rsvp, "added_at": datetime.now(IST).isoformat()})
+        return {"entries": entries}
+
+    try:
+        result = github_get_put_with_retry(BATCH_DIRECTORY_FILE, site_token, update, f"Batch meet directory: {name}")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "entries": result["entries"]})
+
+
+@app.route('/api/batch-meet/ledger', methods=['GET', 'POST'])
+def batch_meet_ledger():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    if request.method == 'GET':
+        data, _ = github_get(BATCH_LEDGER_FILE, site_token, timeout=10)
+        data = data if isinstance(data, dict) else {"per_head_amount": 0, "entries": []}
+        entries = data.get("entries", [])
+        total_collected = sum(e.get("amount_paid", 0) for e in entries)
+        return jsonify({"ok": True, "per_head_amount": data.get("per_head_amount", 0),
+                        "entries": entries, "total_collected": total_collected})
+
+    body = request.get_json(force=True, silent=True) or {}
+    name = _clean_str(body.get("name"), 100)
+    phone = _clean_str(body.get("phone"), 20)
+    try:
+        amount_paid = float(body.get("amount_paid", 0))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "amount_paid must be a number."}), 400
+    if not name or not phone or not _valid_phone(phone) or amount_paid < 0:
+        return jsonify({"ok": False, "error": "A valid name, phone number, and non-negative amount are required."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"per_head_amount": 0, "entries": []}
+        entries = data.get("entries", [])
+        for e in entries:
+            if e.get("phone") == phone:
+                e["name"] = name
+                e["amount_paid"] = amount_paid
+                e["paid_at"] = datetime.now(IST).isoformat()
+                return {"per_head_amount": data.get("per_head_amount", 0), "entries": entries}
+        entries.append({"name": name, "phone": phone, "amount_paid": amount_paid, "paid_at": datetime.now(IST).isoformat()})
+        return {"per_head_amount": data.get("per_head_amount", 0), "entries": entries}
+
+    try:
+        result = github_get_put_with_retry(BATCH_LEDGER_FILE, site_token, update, f"Batch meet payment: {name}")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "entries": result["entries"]})
+
+
+@app.route('/api/batch-meet/ledger/set-per-head', methods=['POST'])
+def batch_meet_set_per_head():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        amount = float(body.get("amount", -1))
+    except (TypeError, ValueError):
+        amount = -1
+    if amount < 0:
+        return jsonify({"ok": False, "error": "amount must be a non-negative number."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"per_head_amount": 0, "entries": []}
+        data["per_head_amount"] = amount
+        return data
+
+    try:
+        result = github_get_put_with_retry(BATCH_LEDGER_FILE, site_token, update, f"Batch meet per-head amount set to {amount}")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "per_head_amount": result["per_head_amount"]})
+
+
+@app.route('/api/batch-meet/tasks', methods=['GET', 'POST'])
+def batch_meet_tasks():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    if request.method == 'GET':
+        data, _ = github_get(BATCH_TASKS_FILE, site_token, timeout=10)
+        tasks = (data or {}).get("tasks", [])
+        return jsonify({"ok": True, "tasks": tasks})
+
+    body = request.get_json(force=True, silent=True) or {}
+    category = _clean_str(body.get("category"), 60)
+    title = _clean_str(body.get("title"), 200)
+    owner = _clean_str(body.get("owner"), 100)
+    notes = _clean_str(body.get("notes"), 500)
+    if not category or not title:
+        return jsonify({"ok": False, "error": "category and title are required."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"tasks": []}
+        tasks = data.get("tasks", [])
+        new_id = (max([t.get("id", 0) for t in tasks], default=0)) + 1
+        tasks.append({
+            "id": new_id, "category": category, "title": title, "owner": owner,
+            "notes": notes, "status": "open", "created_at": datetime.now(IST).isoformat(),
+        })
+        return {"tasks": tasks}
+
+    try:
+        result = github_get_put_with_retry(BATCH_TASKS_FILE, site_token, update, f"Batch meet task added: {title}")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "tasks": result["tasks"]})
+
+
+@app.route('/api/batch-meet/tasks/update', methods=['POST'])
+def batch_meet_tasks_update():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        task_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "A valid task id is required."}), 400
+    status = body.get("status") if body.get("status") in ("open", "in-progress", "done") else None
+    owner = body.get("owner")
+    notes = body.get("notes")
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"tasks": []}
+        tasks = data.get("tasks", [])
+        for t in tasks:
+            if t.get("id") == task_id:
+                if status: t["status"] = status
+                if owner is not None: t["owner"] = _clean_str(owner, 100)
+                if notes is not None: t["notes"] = _clean_str(notes, 500)
+                t["updated_at"] = datetime.now(IST).isoformat()
+                break
+        return {"tasks": tasks}
+
+    try:
+        result = github_get_put_with_retry(BATCH_TASKS_FILE, site_token, update, f"Batch meet task {task_id} updated")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "tasks": result["tasks"]})
 
 
 @app.route('/', methods=['GET'])
