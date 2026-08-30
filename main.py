@@ -7747,6 +7747,55 @@ def _valid_phone(phone):
     return 7 <= len(digits) <= 15
 
 
+RECEIPT_VERIFY_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "looks_like_payment_confirmation": {"type": "BOOLEAN", "description": "true only if this image genuinely looks like a payment/transaction confirmation screenshot (UPI app, bank SMS, payment gateway receipt, etc) - false for anything else (a random photo, a blank image, an unrelated screenshot)"},
+        "detected_amount": {"type": "NUMBER", "description": "the payment amount shown in the image, if one is visible - 0 if no amount is clearly visible"},
+    },
+    "required": ["looks_like_payment_confirmation", "detected_amount"]
+}
+
+
+def verify_receipt_with_gemini(gemini_key, image_base64, image_mime, claimed_amount):
+    # Soft-check, not a hard gate: vision extraction isn't perfectly
+    # reliable, so a mismatch becomes a warning the person can see and
+    # confirm past, not an automatic rejection. Catches the two things that
+    # actually matter here - an honest typo in the amount, and someone
+    # accidentally attaching an unrelated photo - without being so strict
+    # that a slightly-blurry real screenshot gets wrongly blocked.
+    try:
+        parts = [
+            {"text": "Look at this image. Is it a genuine payment/transaction confirmation (UPI app screen, bank SMS, payment gateway receipt, etc)? If an amount is visible, what is it?"},
+            {"inline_data": {"mime_type": image_mime, "data": image_base64}},
+        ]
+        payload = json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {"maxOutputTokens": 300, "responseMimeType": "application/json", "responseSchema": RECEIPT_VERIFY_SCHEMA},
+        }).encode()
+        req = urllib.request.Request(f"{GEMINI_URL}?key={gemini_key}", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("batch_meet_receipt_verify", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
+        parsed = json.loads(result["candidates"][0]["content"]["parts"][0]["text"])
+
+        warning = None
+        if not parsed.get("looks_like_payment_confirmation"):
+            warning = "This doesn't look like a payment confirmation screenshot - please double-check you attached the right image."
+        elif parsed.get("detected_amount", 0) > 0 and abs(parsed["detected_amount"] - claimed_amount) > 1:
+            warning = f"The screenshot appears to show ₹{parsed['detected_amount']:.0f}, but you entered ₹{claimed_amount:.0f} - please double-check."
+        return warning
+    except Exception:
+        # AI verification is a nice-to-have on top of the actual payment
+        # record, not a dependency - if this fails for any reason (API
+        # error, timeout, unparseable image), the payment still saves
+        # normally with no warning, rather than blocking anything.
+        return None
+
+
 @app.route('/api/batch-meet/directory', methods=['GET', 'POST'])
 def batch_meet_directory():
     site_token = os.environ.get("SITE_REPO_TOKEN")
@@ -7793,6 +7842,31 @@ def batch_meet_directory():
     return jsonify({"ok": True, "entries": result["entries"]})
 
 
+@app.route('/api/batch-meet/directory/delete', methods=['POST'])
+def batch_meet_directory_delete():
+    # Self-service delete only, scoped to the same phone number that
+    # created the entry - not open deletion by anyone for anyone. This is
+    # specifically for undoing your own accidental save, not moderation.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    body = request.get_json(force=True, silent=True) or {}
+    phone = _clean_str(body.get("phone"), 20)
+    if not phone:
+        return jsonify({"ok": False, "error": "phone is required."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"entries": []}
+        data["entries"] = [e for e in data.get("entries", []) if e.get("phone") != phone]
+        return data
+
+    try:
+        result = github_get_put_with_retry(BATCH_DIRECTORY_FILE, site_token, update, f"Batch meet directory entry removed: {phone}")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "entries": result["entries"]})
+
+
 @app.route('/api/batch-meet/ledger', methods=['GET', 'POST'])
 def batch_meet_ledger():
     site_token = os.environ.get("SITE_REPO_TOKEN")
@@ -7817,25 +7891,34 @@ def batch_meet_ledger():
     if not name or not phone or not _valid_phone(phone) or amount_paid < 0:
         return jsonify({"ok": False, "error": "A valid name, phone number, and non-negative amount are required."}), 400
 
-    # Receipt screenshot is optional - uploaded as its own file, not
-    # embedded in the ledger JSON (see github_put_binary above for why).
-    receipt_url = None
+    # Receipt screenshot is now mandatory (was optional) - uploaded as its
+    # own file, not embedded in the ledger JSON (see github_put_binary
+    # above for why).
     receipt_b64 = body.get("receipt_image_base64")
     receipt_mime = body.get("receipt_mime", "image/jpeg")
-    if receipt_b64:
-        ext = "png" if "png" in receipt_mime else "jpg"
-        if len(receipt_b64) > 2_000_000:  # ~1.5MB decoded - client should already compress before sending; this is a hard backstop, not the primary control
-            return jsonify({"ok": False, "error": "Receipt image is too large - please retake or use a smaller photo."}), 400
-        try:
-            raw_bytes = base64.b64decode(receipt_b64)
-            receipt_path = f"batch-meet-receipts/{phone}_{int(datetime.now(IST).timestamp())}.{ext}"
-            github_put_binary(receipt_path, site_token, raw_bytes, f"Batch meet receipt: {name}")
-            receipt_url = f"https://raw.githubusercontent.com/{REPO}/main/{receipt_path}"
-        except Exception as e:
-            # A failed receipt upload should never block the actual payment
-            # record from saving - the money tracking matters more than the
-            # screenshot, so this fails soft and the payment still saves.
-            receipt_url = None
+    if not receipt_b64:
+        return jsonify({"ok": False, "error": "A payment screenshot is required."}), 400
+    if len(receipt_b64) > 2_000_000:  # ~1.5MB decoded - client should already compress before sending; this is a hard backstop, not the primary control
+        return jsonify({"ok": False, "error": "Receipt image is too large - please retake or use a smaller photo."}), 400
+
+    receipt_url = None
+    try:
+        raw_bytes = base64.b64decode(receipt_b64)
+        receipt_path = f"batch-meet-receipts/{phone}_{int(datetime.now(IST).timestamp())}.{'png' if 'png' in receipt_mime else 'jpg'}"
+        github_put_binary(receipt_path, site_token, raw_bytes, f"Batch meet receipt: {name}")
+        receipt_url = f"https://raw.githubusercontent.com/{REPO}/main/{receipt_path}"
+    except Exception:
+        # If the upload itself fails, the receipt is genuinely required, so
+        # this is a real failure now (unlike before, when it was optional
+        # and could fail soft) - the person needs to know and retry.
+        return jsonify({"ok": False, "error": "Could not upload the receipt image - please try again."}), 502
+
+    # AI cross-check: soft warning only, never blocks the save (see
+    # verify_receipt_with_gemini for why) - runs after the upload succeeds
+    # so the person's real payment record is never at risk from an AI call
+    # failing or being slow.
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    receipt_warning = verify_receipt_with_gemini(gemini_key, receipt_b64, receipt_mime, amount_paid) if gemini_key else None
 
     def update(existing):
         data = existing if isinstance(existing, dict) else {"per_head_amount": 0, "entries": []}
@@ -7858,7 +7941,30 @@ def batch_meet_ledger():
         result = github_get_put_with_retry(BATCH_LEDGER_FILE, site_token, update, f"Batch meet payment: {name}")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:300]}), 502
-    return jsonify({"ok": True, "entries": result["entries"], "receipt_uploaded": bool(receipt_url)})
+    return jsonify({"ok": True, "entries": result["entries"], "receipt_uploaded": bool(receipt_url), "receipt_warning": receipt_warning})
+
+
+@app.route('/api/batch-meet/ledger/delete', methods=['POST'])
+def batch_meet_ledger_delete():
+    # Same self-service-only scoping as the directory delete above.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    body = request.get_json(force=True, silent=True) or {}
+    phone = _clean_str(body.get("phone"), 20)
+    if not phone:
+        return jsonify({"ok": False, "error": "phone is required."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"per_head_amount": 0, "entries": []}
+        data["entries"] = [e for e in data.get("entries", []) if e.get("phone") != phone]
+        return data
+
+    try:
+        result = github_get_put_with_retry(BATCH_LEDGER_FILE, site_token, update, f"Batch meet payment removed: {phone}")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "entries": result["entries"]})
 
 
 @app.route('/api/batch-meet/ledger/set-per-head', methods=['POST'])
@@ -7950,6 +8056,33 @@ def batch_meet_tasks_update():
 
     try:
         result = github_get_put_with_retry(BATCH_TASKS_FILE, site_token, update, f"Batch meet task {task_id} updated")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, "tasks": result["tasks"]})
+
+
+@app.route('/api/batch-meet/tasks/delete', methods=['POST'])
+def batch_meet_tasks_delete():
+    # Tasks aren't tied to personal identity the way directory/ledger
+    # entries are, so deletion isn't phone-scoped here - the frontend adds
+    # a confirmation prompt instead, as friction against a pure misclick
+    # rather than an identity check.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        task_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "A valid task id is required."}), 400
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"tasks": []}
+        data["tasks"] = [t for t in data.get("tasks", []) if t.get("id") != task_id]
+        return data
+
+    try:
+        result = github_get_put_with_retry(BATCH_TASKS_FILE, site_token, update, f"Batch meet task {task_id} deleted")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:300]}), 502
     return jsonify({"ok": True, "tasks": result["tasks"]})
