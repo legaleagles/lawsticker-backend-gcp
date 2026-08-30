@@ -7736,6 +7736,7 @@ def x_pulse_vote():
 BATCH_DIRECTORY_FILE = "batch-meet-directory.json"
 BATCH_LEDGER_FILE = "batch-meet-ledger.json"
 BATCH_TASKS_FILE = "batch-meet-tasks.json"
+BATCH_DETAILS_FILE = "batch-meet-details.json"
 
 
 def _clean_str(val, max_len=200):
@@ -8106,6 +8107,40 @@ def batch_meet_tasks_delete():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:300]}), 502
     return jsonify({"ok": True, "tasks": result["tasks"]})
+
+
+@app.route('/api/batch-meet/details', methods=['GET', 'POST'])
+def batch_meet_details():
+    # Event date/venue - deliberately stored live rather than hardcoded
+    # into the pages, since the venue is still pending and whoever
+    # finalizes it should be able to update this themselves without
+    # needing a code change/redeploy each time.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    if not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    if request.method == 'GET':
+        data, _ = github_get(BATCH_DETAILS_FILE, site_token, timeout=10)
+        data = data if isinstance(data, dict) else {}
+        return jsonify({"ok": True,
+                        "event_dates": data.get("event_dates", ""),
+                        "venue": data.get("venue", ""),
+                        "notes": data.get("notes", ""),
+                        "updated_at": data.get("updated_at", "")})
+
+    body = request.get_json(force=True, silent=True) or {}
+    event_dates = _clean_str(body.get("event_dates"), 200)
+    venue = _clean_str(body.get("venue"), 300)
+    notes = _clean_str(body.get("notes"), 500)
+
+    def update(existing):
+        return {"event_dates": event_dates, "venue": venue, "notes": notes, "updated_at": datetime.now(IST).isoformat()}
+
+    try:
+        result = github_get_put_with_retry(BATCH_DETAILS_FILE, site_token, update, "Batch meet event details updated")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 502
+    return jsonify({"ok": True, **result})
 
 
 @app.route('/', methods=['GET'])
