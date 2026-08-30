@@ -82,6 +82,24 @@ def github_put(path, token, content_obj, sha, message, timeout=15):
         return resp.status
 
 
+def github_put_binary(path, token, raw_bytes, message):
+    # For actual image files, not JSON - github_put above JSON-serializes
+    # its content_obj, which would corrupt binary data. Payment receipt
+    # screenshots are stored as their own files (batch-meet-receipts/...)
+    # rather than base64-embedded inside the ledger JSON, since embedding
+    # would bloat that file badly at ~150-person scale and slow down every
+    # single read/write to it, most of which have nothing to do with images.
+    payload = {"message": message, "content": base64.b64encode(raw_bytes).decode(), "branch": "main"}
+    req = urllib.request.Request(
+        f"{GITHUB_API}/repos/{REPO}/contents/{path}",
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json", "Content-Type": "application/json"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.status
+
+
 def github_get_put_with_retry(path, token, update_fn, message, max_retries=4):
     # Read-modify-write with retry on conflict - genuinely matters here in a
     # way it hasn't for other features this session: with ~150 people
@@ -7799,6 +7817,26 @@ def batch_meet_ledger():
     if not name or not phone or not _valid_phone(phone) or amount_paid < 0:
         return jsonify({"ok": False, "error": "A valid name, phone number, and non-negative amount are required."}), 400
 
+    # Receipt screenshot is optional - uploaded as its own file, not
+    # embedded in the ledger JSON (see github_put_binary above for why).
+    receipt_url = None
+    receipt_b64 = body.get("receipt_image_base64")
+    receipt_mime = body.get("receipt_mime", "image/jpeg")
+    if receipt_b64:
+        ext = "png" if "png" in receipt_mime else "jpg"
+        if len(receipt_b64) > 2_000_000:  # ~1.5MB decoded - client should already compress before sending; this is a hard backstop, not the primary control
+            return jsonify({"ok": False, "error": "Receipt image is too large - please retake or use a smaller photo."}), 400
+        try:
+            raw_bytes = base64.b64decode(receipt_b64)
+            receipt_path = f"batch-meet-receipts/{phone}_{int(datetime.now(IST).timestamp())}.{ext}"
+            github_put_binary(receipt_path, site_token, raw_bytes, f"Batch meet receipt: {name}")
+            receipt_url = f"https://raw.githubusercontent.com/{REPO}/main/{receipt_path}"
+        except Exception as e:
+            # A failed receipt upload should never block the actual payment
+            # record from saving - the money tracking matters more than the
+            # screenshot, so this fails soft and the payment still saves.
+            receipt_url = None
+
     def update(existing):
         data = existing if isinstance(existing, dict) else {"per_head_amount": 0, "entries": []}
         entries = data.get("entries", [])
@@ -7807,15 +7845,20 @@ def batch_meet_ledger():
                 e["name"] = name
                 e["amount_paid"] = amount_paid
                 e["paid_at"] = datetime.now(IST).isoformat()
+                if receipt_url:
+                    e["receipt_url"] = receipt_url
                 return {"per_head_amount": data.get("per_head_amount", 0), "entries": entries}
-        entries.append({"name": name, "phone": phone, "amount_paid": amount_paid, "paid_at": datetime.now(IST).isoformat()})
+        new_entry = {"name": name, "phone": phone, "amount_paid": amount_paid, "paid_at": datetime.now(IST).isoformat()}
+        if receipt_url:
+            new_entry["receipt_url"] = receipt_url
+        entries.append(new_entry)
         return {"per_head_amount": data.get("per_head_amount", 0), "entries": entries}
 
     try:
         result = github_get_put_with_retry(BATCH_LEDGER_FILE, site_token, update, f"Batch meet payment: {name}")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:300]}), 502
-    return jsonify({"ok": True, "entries": result["entries"]})
+    return jsonify({"ok": True, "entries": result["entries"], "receipt_uploaded": bool(receipt_url)})
 
 
 @app.route('/api/batch-meet/ledger/set-per-head', methods=['POST'])
