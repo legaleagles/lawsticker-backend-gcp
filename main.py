@@ -5792,6 +5792,7 @@ def daily_scam_ed():
         generated = []   # list of (entry_dict, ref_number)
         used_topics = set()
         ts_base = int(datetime.now(timezone.utc).timestamp())
+        gemini_errors = []  # real failure reasons, surfaced instead of silently swallowed - same lesson as the earlier Grok debugging saga
 
         # A few spare tries: some topics won't have a findable real source,
         # some will turn out duplicate — both just move to the next topic.
@@ -5810,17 +5811,17 @@ def daily_scam_ed():
                 if dup.get("is_duplicate"):
                     continue
 
-            # Phase 1 — grounded search for a real, sourced case. Back to
-            # Gemini directly - the Grok pilot never once produced a
-            # successful discovery since going live (zero real Grok calls
-            # logged across multiple days), so it's pulled from this
-            # pipeline entirely rather than spending further time
-            # diagnosing why. Grok/XAI_API_KEY stays available on this
-            # service for a different use case later if wanted.
+            # Phase 1 — grounded search for a real, sourced case. Gemini
+            # directly (Grok removed per explicit request). Captures the
+            # real error per attempt now, rather than a bare except-continue
+            # - that exact pattern is what hid the Grok auth failure for
+            # days earlier; it would hide a Gemini failure just as
+            # invisibly if left in place here.
             search_prompt = build_grounded_search_prompt(category, topic_label)
             try:
                 grounded_text, source_urls = call_gemini_grounded(gemini_key, search_prompt)
-            except Exception:
+            except Exception as e:
+                gemini_errors.append({"topic": topic_label, "error": str(e)[:300]})
                 continue
 
             if not grounded_text or "NO VERIFIABLE SOURCE FOUND" in grounded_text or not source_urls:
@@ -5886,8 +5887,19 @@ def daily_scam_ed():
             generated.append((entry, ref_number))
 
         if not generated:
+            if gemini_errors and bot_token and chat_id:
+                try:
+                    sample = gemini_errors[0]["error"]
+                    msg = (f"⚠️ <b>Scam Stories: nothing published today</b>\n\n"
+                           f"{len(gemini_errors)} topic attempt(s) failed with a real error (not just 'no source found'):\n"
+                           f"<code>{sample[:200]}</code>")
+                    for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+                        send_telegram(bot_token, cid, msg)
+                except Exception:
+                    pass
             return jsonify({"ok": True, "skipped": True,
-                            "reason": "No topic today had a verifiable real source."})
+                            "reason": "No topic today had a verifiable real source.",
+                            "gemini_errors": gemini_errors or None})
 
         public_data["entries"] = public_entries[-1000:]
         github_put(PUBLIC_FILE, site_token, public_data, public_sha,
