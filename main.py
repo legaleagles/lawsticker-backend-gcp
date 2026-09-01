@@ -8252,29 +8252,44 @@ def check_and_record_rate_limit(action_name):
 RESUME_POLISH_SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "summary": {"type": "STRING", "description": "A polished 2-3 sentence professional summary, in plain confident English - if the input summary was empty, generate a reasonable one from the education/experience/skills given instead"},
+        "summary": {"type": "STRING", "description": "A polished, confident professional summary in plain English - normally 2-3 sentences, but 3-4 substantive sentences is fine and preferred when the rest of the resume (experience/projects) is thin, so the resume doesn't read as sparse. Never generic filler - every sentence must say something real and specific about this actual person."},
         "experience_bullets": {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
                 "properties": {
                     "index": {"type": "NUMBER", "description": "matches the position of this experience entry in the input list, 0-based"},
-                    "bullets": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "2-4 polished, specific bullet points for this role - action-verb-led, concrete, no invented numbers or claims not implied by the rough input"},
+                    "bullets": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "polished, specific bullet points for this role, action-verb-led. If the rough input describes real substance (tools used, tasks done, what was learned), unpack it into 3-5 distinct bullets covering different real facets rather than compressing everything into 1-2 - this is about writing more THOROUGHLY about what actually happened, never about inventing new facts. If the rough input is genuinely just one thin sentence with nothing more to unpack, 1-2 honest bullets is correct and forcing more would just be padding."},
+                },
+                "required": ["index", "bullets"],
+            },
+        },
+        "project_bullets": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "index": {"type": "NUMBER", "description": "matches the position of this project entry in the input list, 0-based"},
+                    "bullets": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "same rules as experience bullets - unpack real substance into multiple specific bullets, never invent scope or outcomes not stated"},
                 },
                 "required": ["index", "bullets"],
             },
         },
     },
-    "required": ["summary", "experience_bullets"],
+    "required": ["summary", "experience_bullets", "project_bullets"],
 }
 
 
-def build_resume_polish_prompt(name, target_role, summary, education, experience, skills):
+def build_resume_polish_prompt(name, target_role, summary, education, experience, skills, projects):
     exp_text = "\n".join(
         f"{i}. {e.get('title','')} at {e.get('org','')} ({e.get('duration','')}): {e.get('rough_description','')}"
         for i, e in enumerate(experience)
     ) or "(none provided)"
     edu_text = "\n".join(f"- {e.get('degree','')}, {e.get('institution','')} ({e.get('year','')})" for e in education) or "(none provided)"
+    proj_text = "\n".join(
+        f"{i}. {p.get('title','')}: {p.get('rough_description','')}"
+        for i, p in enumerate(projects)
+    ) or "(none provided)"
 
     return f"""Help turn rough, informally-written resume input into polished, professional English resume content. The person may have written their input in simple language, or mixed languages (Telugu/Hindi/English) - understand the meaning and produce clean professional English output.
 
@@ -8289,10 +8304,13 @@ Education:
 Work/internship experience (rough descriptions as written):
 {exp_text}
 
+Academic/personal projects (rough descriptions as written):
+{proj_text}
+
 CRITICAL RULES:
-- Never invent specific numbers, metrics, or achievements not implied by what was actually written (no fabricated "increased efficiency by 40%" type claims).
-- Keep bullets grounded in what the person actually described, just phrased more professionally and concretely - turn vague duties into clear, specific-sounding statements using their own real content, not invented content.
-- If the rough input was very thin (e.g. "helped with work"), produce a modest, honest bullet rather than an inflated one - do not oversell.
+- Never invent specific numbers, metrics, tools, or achievements not implied by what was actually written (no fabricated "increased efficiency by 40%" type claims, no inventing a technology that wasn't mentioned).
+- Keep every bullet grounded in what the person actually described - write MORE THOROUGHLY about real substance (more distinct bullets unpacking genuinely different aspects of the same real experience), never PAD with generic filler sentences that don't say anything specific ("worked hard", "gained valuable experience", "contributed to team success" and similar vague phrases are exactly what to avoid).
+- If a rough input is genuinely just one thin sentence with nothing further to honestly unpack, a short, honest 1-2 bullet result is correct - do not stretch it artificially. The goal is a thorough, honest account of what's real, not a fixed word count.
 - Plain, confident, professional English - no jargon for its own sake."""
 
 
@@ -8317,14 +8335,17 @@ def resume_polish():
     education = body.get("education", [])[:10] if isinstance(body.get("education"), list) else []
     experience = body.get("experience", [])[:10] if isinstance(body.get("experience"), list) else []
     skills = body.get("skills", [])[:30] if isinstance(body.get("skills"), list) else []
+    projects = body.get("projects", [])[:10] if isinstance(body.get("projects"), list) else []
 
     try:
-        prompt = build_resume_polish_prompt(name, target_role, summary, education, experience, skills)
-        result = call_gemini_structured(gemini_key, prompt, RESUME_POLISH_SCHEMA, max_tokens=1200)
+        prompt = build_resume_polish_prompt(name, target_role, summary, education, experience, skills, projects)
+        result = call_gemini_structured(gemini_key, prompt, RESUME_POLISH_SCHEMA, max_tokens=1800)
     except Exception as e:
         return jsonify({"ok": False, "error": f"Could not polish resume content: {str(e)[:300]}"}), 502
 
-    return jsonify({"ok": True, "summary": result.get("summary", ""), "experience_bullets": result.get("experience_bullets", [])})
+    return jsonify({"ok": True, "summary": result.get("summary", ""),
+                    "experience_bullets": result.get("experience_bullets", []),
+                    "project_bullets": result.get("project_bullets", [])})
 
 
 RESUME_PARSE_SCHEMA = {
@@ -8339,6 +8360,7 @@ RESUME_PARSE_SCHEMA = {
             "type": "ARRAY",
             "items": {"type": "OBJECT", "properties": {
                 "degree": {"type": "STRING"}, "institution": {"type": "STRING"}, "year": {"type": "STRING"},
+                "percentage": {"type": "STRING", "description": "percentage or CGPA if shown, empty string if not present"},
             }},
         },
         "experience": {
@@ -8348,6 +8370,15 @@ RESUME_PARSE_SCHEMA = {
                 "rough_description": {"type": "STRING", "description": "combine whatever bullet points/description existed for this role into one plain paragraph"},
             }},
         },
+        "projects": {
+            "type": "ARRAY",
+            "items": {"type": "OBJECT", "properties": {
+                "title": {"type": "STRING"}, "rough_description": {"type": "STRING"},
+            }},
+            "description": "academic or personal projects section, if one exists in the document - empty array if not present",
+        },
+        "certifications": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "empty array if no certifications section exists"},
+        "languages": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "empty array if no languages section exists"},
         "skills": {"type": "ARRAY", "items": {"type": "STRING"}},
     },
     "required": ["name", "education", "experience", "skills"],
