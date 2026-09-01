@@ -6475,9 +6475,15 @@ def _get_gcp_access_token():
 
 
 def _ga4_run_report(property_id, access_token, days=1):
+    # pageTitle was previously included as a co-dimension, which caused a
+    # real bug: if the same URL ever recorded two different titles (a
+    # dynamic title, a stale cache, a query-string variant), GA4 returned
+    # them as separate rows - the exact cause of /eklavya-subject.html
+    # showing twice with a split view count. Querying by pagePath alone
+    # lets GA4 do the aggregation correctly at the source.
     body = {
         "dateRanges": [{"startDate": f"{days}daysAgo", "endDate": "today"}],
-        "dimensions": [{"name": "pagePath"}, {"name": "pageTitle"}],
+        "dimensions": [{"name": "pagePath"}],
         "metrics": [{"name": "screenPageViews"}, {"name": "activeUsers"}],
         "orderBys": [{"metric": {"metricName": "screenPageViews"}, "desc": True}],
         "limit": 25,
@@ -6489,7 +6495,31 @@ def _ga4_run_report(property_id, access_token, days=1):
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
+        result = json.loads(resp.read().decode())
+
+    # Defensive re-aggregation on top of the query fix above - a second,
+    # independent safety net so this can't silently reappear if a future
+    # change (a new dimension, a GA4 quirk) reintroduces split rows for the
+    # same path. Groups by pagePath and sums views/users across any
+    # residual duplicates before anything downstream ever sees them.
+    rows = result.get("rows", [])
+    merged = {}
+    for r in rows:
+        path = r["dimensionValues"][0]["value"]
+        views = int(r["metricValues"][0]["value"])
+        users = int(r["metricValues"][1]["value"])
+        if path in merged:
+            merged[path]["views"] += views
+            merged[path]["users"] += users
+        else:
+            merged[path] = {"views": views, "users": users}
+    merged_rows = [
+        {"dimensionValues": [{"value": path}],
+         "metricValues": [{"value": str(v["views"])}, {"value": str(v["users"])}]}
+        for path, v in sorted(merged.items(), key=lambda kv: -kv[1]["views"])
+    ]
+    result["rows"] = merged_rows
+    return result
 
 
 GA4_DIGEST_STATE_FILE = "ga4-digest-state.json"
@@ -6506,7 +6536,13 @@ Top pages:
 Eklavya (LLB study feature) pages: {eklavya_views} total views.
 {eklavya_text}
 
-Write a short (3-4 sentence), plain-language analysis for the site owner covering: what's actually driving traffic today, whether Eklavya's share of traffic looks healthy or worth attention, and one concrete, specific observation worth acting on (not generic advice like "keep posting content"). Be specific to the actual numbers given, not generic. Do not repeat the raw numbers back — interpret them."""
+Write a short (3-4 sentence), plain-language analysis for the site owner. Follow these rules strictly - they matter more than sounding confident:
+
+1. This is pageview COUNTS per page, not a user journey - never claim one page "leads to" or "converts into" another, or that users "aren't converting" between pages, unless the data actually shows session-level paths (it doesn't here). Two pages both having views does not mean visitors moved between them.
+2. Never use words like "proves" or "confirms" from a single day's numbers. A single day is a snapshot, not a trend - if {period_label} is "yesterday" or covers only 1 day, say so explicitly and note that one day's mix can be noisy before drawing any conclusion from it.
+3. If total_users is under ~50, explicitly flag that the sample is small enough that specific percentages (e.g. "X makes up a third of traffic") deserve real caution, not confident framing.
+4. If anything in the data looks like it could be an anomaly (e.g. the same-looking page appearing twice, one page with an unusually dominant share), name that plainly as worth double-checking rather than building a confident narrative on top of it.
+5. End with one concrete, specific, low-effort thing worth checking or doing next - not generic advice like "keep posting content" - but frame it as worth investigating, not as a proven fix."""
 
 
 @app.route('/api/ga4-daily-digest', methods=['GET'])
