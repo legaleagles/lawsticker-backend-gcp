@@ -8191,6 +8191,80 @@ def batch_meet_details():
     return jsonify({"ok": True, **result})
 
 
+RESUME_POLISH_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "summary": {"type": "STRING", "description": "A polished 2-3 sentence professional summary, in plain confident English - if the input summary was empty, generate a reasonable one from the education/experience/skills given instead"},
+        "experience_bullets": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "index": {"type": "NUMBER", "description": "matches the position of this experience entry in the input list, 0-based"},
+                    "bullets": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "2-4 polished, specific bullet points for this role - action-verb-led, concrete, no invented numbers or claims not implied by the rough input"},
+                },
+                "required": ["index", "bullets"],
+            },
+        },
+    },
+    "required": ["summary", "experience_bullets"],
+}
+
+
+def build_resume_polish_prompt(name, target_role, summary, education, experience, skills):
+    exp_text = "\n".join(
+        f"{i}. {e.get('title','')} at {e.get('org','')} ({e.get('duration','')}): {e.get('rough_description','')}"
+        for i, e in enumerate(experience)
+    ) or "(none provided)"
+    edu_text = "\n".join(f"- {e.get('degree','')}, {e.get('institution','')} ({e.get('year','')})" for e in education) or "(none provided)"
+
+    return f"""Help turn rough, informally-written resume input into polished, professional English resume content. The person may have written their input in simple language, or mixed languages (Telugu/Hindi/English) - understand the meaning and produce clean professional English output.
+
+Name: {name}
+Target role/field (if given): {target_role or "not specified"}
+Rough summary (may be empty): {summary or "(none provided)"}
+Skills: {', '.join(skills) if skills else "(none provided)"}
+
+Education:
+{edu_text}
+
+Work/internship experience (rough descriptions as written):
+{exp_text}
+
+CRITICAL RULES:
+- Never invent specific numbers, metrics, or achievements not implied by what was actually written (no fabricated "increased efficiency by 40%" type claims).
+- Keep bullets grounded in what the person actually described, just phrased more professionally and concretely - turn vague duties into clear, specific-sounding statements using their own real content, not invented content.
+- If the rough input was very thin (e.g. "helped with work"), produce a modest, honest bullet rather than an inflated one - do not oversell.
+- Plain, confident, professional English - no jargon for its own sake."""
+
+
+@app.route('/api/resume-polish', methods=['POST'])
+def resume_polish():
+    # Deliberately stateless - nothing here gets written to GitHub or
+    # persisted anywhere, unlike almost every other endpoint in this file.
+    # Education/work history is genuinely sensitive personal data, and
+    # there's no reason to store it for a generate-and-download tool.
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    name = _clean_str(body.get("name"), 100)
+    target_role = str(body.get("target_role", ""))[:100].strip()
+    summary = str(body.get("summary", ""))[:1000].strip()
+    education = body.get("education", [])[:10] if isinstance(body.get("education"), list) else []
+    experience = body.get("experience", [])[:10] if isinstance(body.get("experience"), list) else []
+    skills = body.get("skills", [])[:30] if isinstance(body.get("skills"), list) else []
+
+    try:
+        prompt = build_resume_polish_prompt(name, target_role, summary, education, experience, skills)
+        result = call_gemini_structured(gemini_key, prompt, RESUME_POLISH_SCHEMA, max_tokens=1200)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not polish resume content: {str(e)[:300]}"}), 502
+
+    return jsonify({"ok": True, "summary": result.get("summary", ""), "experience_bullets": result.get("experience_bullets", [])})
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
