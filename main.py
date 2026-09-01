@@ -8191,6 +8191,64 @@ def batch_meet_details():
     return jsonify({"ok": True, **result})
 
 
+RESUME_RATE_LIMIT_FILE = "resume-tool-rate-limits.json"
+RESUME_RATE_LIMIT_MAX_CALLS = 8      # per IP, per window
+RESUME_RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour
+
+
+def get_client_ip():
+    # Cloud Run sits behind Google's proxy, so request.remote_addr shows
+    # the internal proxy, not the real client - the real IP is the first
+    # entry in X-Forwarded-For.
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def check_and_record_rate_limit(action_name):
+    # Deliberately tracks ONLY ip + timestamp + action, nothing about the
+    # actual request content - kept fully separate from anything
+    # resume-related, so this doesn't compromise the "nothing about your
+    # resume is stored" commitment. Auto-prunes entries older than the
+    # window on every call, so this file never grows unbounded.
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    ip = get_client_ip()
+    now = datetime.now(timezone.utc).timestamp()
+
+    if not site_token:
+        return True, None  # fail open - a missing token shouldn't block the actual feature
+
+    try:
+        existing, sha = github_get(RESUME_RATE_LIMIT_FILE, site_token, timeout=8)
+    except Exception:
+        existing, sha = None, None
+    data = existing if isinstance(existing, dict) else {}
+    entries = [e for e in data.get(ip, []) if now - e < RESUME_RATE_LIMIT_WINDOW_SECONDS]
+
+    if len(entries) >= RESUME_RATE_LIMIT_MAX_CALLS:
+        return False, f"You've reached the limit of {RESUME_RATE_LIMIT_MAX_CALLS} uses per hour for this free tool. Please try again later."
+
+    entries.append(now)
+    data[ip] = entries
+    # Also prune other IPs' stale entries while we're already writing, so
+    # this file stays small over time rather than accumulating every IP
+    # that's ever used the tool.
+    for other_ip in list(data.keys()):
+        if other_ip != ip:
+            pruned = [e for e in data[other_ip] if now - e < RESUME_RATE_LIMIT_WINDOW_SECONDS]
+            if pruned:
+                data[other_ip] = pruned
+            else:
+                del data[other_ip]
+
+    try:
+        github_put(RESUME_RATE_LIMIT_FILE, site_token, data, sha, f"Resume tool rate-limit: {action_name}", timeout=10)
+    except Exception:
+        pass  # rate-limit bookkeeping failing shouldn't block the actual feature
+    return True, None
+
+
 RESUME_POLISH_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -8248,6 +8306,10 @@ def resume_polish():
     if not gemini_key:
         return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
 
+    allowed, rate_error = check_and_record_rate_limit("polish")
+    if not allowed:
+        return jsonify({"ok": False, "error": rate_error}), 429
+
     body = request.get_json(force=True, silent=True) or {}
     name = _clean_str(body.get("name"), 100)
     target_role = str(body.get("target_role", ""))[:100].strip()
@@ -8263,6 +8325,80 @@ def resume_polish():
         return jsonify({"ok": False, "error": f"Could not polish resume content: {str(e)[:300]}"}), 502
 
     return jsonify({"ok": True, "summary": result.get("summary", ""), "experience_bullets": result.get("experience_bullets", [])})
+
+
+RESUME_PARSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "name": {"type": "STRING"},
+        "phone": {"type": "STRING"},
+        "email": {"type": "STRING"},
+        "city": {"type": "STRING"},
+        "summary": {"type": "STRING"},
+        "education": {
+            "type": "ARRAY",
+            "items": {"type": "OBJECT", "properties": {
+                "degree": {"type": "STRING"}, "institution": {"type": "STRING"}, "year": {"type": "STRING"},
+            }},
+        },
+        "experience": {
+            "type": "ARRAY",
+            "items": {"type": "OBJECT", "properties": {
+                "title": {"type": "STRING"}, "org": {"type": "STRING"}, "duration": {"type": "STRING"},
+                "rough_description": {"type": "STRING", "description": "combine whatever bullet points/description existed for this role into one plain paragraph"},
+            }},
+        },
+        "skills": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": ["name", "education", "experience", "skills"],
+}
+
+
+@app.route('/api/resume-parse', methods=['POST'])
+def resume_parse():
+    # Upload an existing resume (PDF or image) and get back structured
+    # data to pre-fill the same editable form the rest of the tool uses -
+    # never a separate read-only result, so everything stays reviewable
+    # and editable exactly like manually-entered data would be. Also fully
+    # stateless: the uploaded file and extracted content are never written
+    # anywhere, only passed through to Gemini and back in the response.
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    allowed, rate_error = check_and_record_rate_limit("parse")
+    if not allowed:
+        return jsonify({"ok": False, "error": rate_error}), 429
+
+    body = request.get_json(force=True, silent=True) or {}
+    file_b64 = body.get("file_base64")
+    file_mime = body.get("file_mime", "application/pdf")
+    if not file_b64:
+        return jsonify({"ok": False, "error": "No file provided."}), 400
+    if len(file_b64) > 8_000_000:  # ~6MB decoded - generous for a resume PDF/image, hard backstop against abuse
+        return jsonify({"ok": False, "error": "File is too large - please upload a smaller file."}), 400
+
+    try:
+        parts = [
+            {"text": "This is an existing resume (PDF or photo). Extract its content into the structured fields below, as faithfully as possible - do not invent anything not present in the document. If a field genuinely isn't present, leave it empty."},
+            {"inline_data": {"mime_type": file_mime, "data": file_b64}},
+        ]
+        payload = json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {"maxOutputTokens": 2000, "responseMimeType": "application/json", "responseSchema": RESUME_PARSE_SCHEMA},
+        }).encode()
+        req = urllib.request.Request(f"{GEMINI_URL}?key={gemini_key}", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+        try:
+            log_ai_call("resume_parse", GEMINI_MODEL, result.get("usageMetadata"), os.environ.get("SITE_REPO_TOKEN"))
+        except Exception:
+            pass
+        parsed = json.loads(result["candidates"][0]["content"]["parts"][0]["text"])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this resume: {str(e)[:300]}"}), 502
+
+    return jsonify({"ok": True, **parsed})
 
 
 @app.route('/', methods=['GET'])
