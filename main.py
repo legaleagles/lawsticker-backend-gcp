@@ -8432,6 +8432,132 @@ def resume_parse():
     return jsonify({"ok": True, **parsed})
 
 
+JOB_MATCH_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "match_assessment": {"type": "STRING", "description": "2-3 honest sentences on how well this resume currently fits the job description - genuinely honest, not falsely encouraging if the fit is weak"},
+        "missing_skills": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "specific skills/keywords the job description mentions that are NOT present anywhere in the resume - only genuinely missing ones actually asked for by the posting, not a generic list"},
+        "emphasis_suggestions": {
+            "type": "ARRAY",
+            "items": {"type": "OBJECT", "properties": {
+                "index": {"type": "NUMBER", "description": "0-based index matching the experience entry"},
+                "suggestion": {"type": "STRING", "description": "one specific, honest suggestion for what to emphasize or reframe from this REAL experience to better match the job description - never suggest claiming something not actually true"},
+            }},
+        },
+    },
+    "required": ["match_assessment", "missing_skills", "emphasis_suggestions"],
+}
+
+
+def build_job_match_prompt(name, summary, education, experience, skills, job_description):
+    exp_text = "\n".join(f"{i}. {e.get('title','')}: {'; '.join(e.get('bullets') or [e.get('rough_description','')])}" for i, e in enumerate(experience)) or "(none)"
+    return f"""Compare this resume against a job description and give honest, actionable feedback.
+
+Resume summary: {summary or "(none)"}
+Resume skills: {', '.join(skills) if skills else "(none)"}
+Resume education: {', '.join(e.get('degree','') for e in education) or "(none)"}
+Resume experience:
+{exp_text}
+
+Job description:
+{job_description}
+
+CRITICAL RULES:
+- Be genuinely honest about fit - if this resume is a weak match, say so plainly rather than being artificially encouraging. A false "great fit!" assessment actively hurts someone by giving them false confidence.
+- missing_skills must only include things the job description ACTUALLY asks for that are genuinely absent from the resume - do not pad this list with things already present.
+- emphasis_suggestions must only reframe or highlight what's REALLY there in the person's real experience - never suggest claiming a skill, tool, or achievement that isn't genuinely implied by their actual background. Suggesting someone lie on their resume is a serious harm, not a helpful shortcut."""
+
+
+@app.route('/api/resume-job-match', methods=['POST'])
+def resume_job_match():
+    # Stateless like the rest of this tool - the job description and
+    # resume content are never persisted, only passed through to Gemini
+    # and back in the response.
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    allowed, rate_error = check_and_record_rate_limit("job_match")
+    if not allowed:
+        return jsonify({"ok": False, "error": rate_error}), 429
+
+    body = request.get_json(force=True, silent=True) or {}
+    job_description = str(body.get("job_description", ""))[:6000].strip()
+    if not job_description:
+        return jsonify({"ok": False, "error": "Please paste a job description."}), 400
+
+    name = _clean_str(body.get("name"), 100)
+    summary = str(body.get("summary", ""))[:1000].strip()
+    education = body.get("education", [])[:10] if isinstance(body.get("education"), list) else []
+    experience = body.get("experience", [])[:10] if isinstance(body.get("experience"), list) else []
+    skills = body.get("skills", [])[:30] if isinstance(body.get("skills"), list) else []
+
+    try:
+        prompt = build_job_match_prompt(name, summary, education, experience, skills, job_description)
+        result = call_gemini_structured(gemini_key, prompt, JOB_MATCH_SCHEMA, max_tokens=1200)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not analyze job match: {str(e)[:300]}"}), 502
+
+    return jsonify({"ok": True, "match_assessment": result.get("match_assessment", ""),
+                    "missing_skills": result.get("missing_skills", []),
+                    "emphasis_suggestions": result.get("emphasis_suggestions", [])})
+
+
+COVER_LETTER_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "cover_letter": {"type": "STRING", "description": "A complete, professional cover letter, 3-4 paragraphs, plain confident English. Address it generically (Dear Hiring Manager) unless a company/role name is given."},
+    },
+    "required": ["cover_letter"],
+}
+
+
+def build_cover_letter_prompt(name, target_role, summary, experience, skills, job_description):
+    exp_text = "\n".join(f"- {e.get('title','')} at {e.get('org','')}: {'; '.join(e.get('bullets') or [e.get('rough_description','')])}" for e in experience) or "(none)"
+    jd_section = f"\n\nThe job description to tailor this letter for:\n{job_description}" if job_description else ""
+    return f"""Write a professional cover letter for this person, grounded only in their real, actual background below - never invent experience, skills, or achievements not stated.
+
+Name: {name}
+Target role: {target_role or "not specified"}
+Summary: {summary or "(none)"}
+Skills: {', '.join(skills) if skills else "(none)"}
+Experience:
+{exp_text}
+{jd_section}
+
+Write 3-4 paragraphs: an opening stating interest in the role, 1-2 paragraphs connecting their REAL background to what the role needs, and a confident closing. Plain, professional English - no generic filler sentences that could apply to anyone."""
+
+
+@app.route('/api/resume-cover-letter', methods=['POST'])
+def resume_cover_letter():
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    allowed, rate_error = check_and_record_rate_limit("cover_letter")
+    if not allowed:
+        return jsonify({"ok": False, "error": rate_error}), 429
+
+    body = request.get_json(force=True, silent=True) or {}
+    name = _clean_str(body.get("name"), 100)
+    if not name:
+        return jsonify({"ok": False, "error": "Name is required."}), 400
+    target_role = str(body.get("target_role", ""))[:100].strip()
+    summary = str(body.get("summary", ""))[:1000].strip()
+    experience = body.get("experience", [])[:10] if isinstance(body.get("experience"), list) else []
+    skills = body.get("skills", [])[:30] if isinstance(body.get("skills"), list) else []
+    job_description = str(body.get("job_description", ""))[:6000].strip()
+
+    try:
+        prompt = build_cover_letter_prompt(name, target_role, summary, experience, skills, job_description)
+        result = call_gemini_structured(gemini_key, prompt, COVER_LETTER_SCHEMA, max_tokens=1000)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not generate cover letter: {str(e)[:300]}"}), 502
+
+    return jsonify({"ok": True, "cover_letter": result.get("cover_letter", "")})
+
+
+
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"ok": True, "service": "lawsticker-backend-full", "routes": [
