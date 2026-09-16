@@ -2194,6 +2194,163 @@ STONE_PRICE_STRUCTURE_SCHEMA = {
 }
 
 
+LLB5_EXAM_CLUSTER_SUBJECTS = {
+    "adr": "Alternate Dispute Resolution",
+    "banking": "Banking Law",
+    "bnss": "Bharatiya Nagarik Suraksha Sanhita",
+    "cpc": "Civil Procedure Code",
+    "ethics": "Professional Ethics",
+}
+
+
+def llb5_pyq_analysis_file(subject):
+    return f"llb-pyq-analysis-{subject}.json"
+
+
+def llb5_clusters_file(subject):
+    return f"llb5-{subject}-clusters.json"
+
+
+LLB5_EXAM_CLUSTER_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "cluster_title": {"type": "STRING", "description": "the topic name as a clean heading"},
+        "one_line_core_idea": {"type": "STRING", "description": "the whole topic distilled to a single sentence a student could recall instantly"},
+        "real_life_scenario": {"type": "STRING", "description": "a short, relatable everyday scenario with a named person, making the legal concept concrete before the technical answer - matches the style of a real student study guide, not a dry textbook"},
+        "part_a_content": {"type": "STRING", "description": "the short-note answer (6 marks) - concise, direct, exam-writable as-is"},
+        "part_a_key_points": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "bold-first bullet points for Part A - each item should be phrasable as BOLD KEYWORD — explanation, the exact style of a topper's quick-revision notes"},
+        "part_a_trick": {"type": "STRING", "description": "a short, memorable mnemonic or memory trick for recalling Part A's content in an exam"},
+        "part_b_content": {"type": "STRING", "description": "the full essay answer (15 marks) - comprehensive, exam-writable, weaving in the case laws below naturally rather than just listing them"},
+        "part_b_case_laws": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "case_name": {"type": "STRING"},
+                    "citation": {"type": "STRING", "description": "year and citation if genuinely known - leave empty rather than guess if uncertain"},
+                    "holding": {"type": "STRING", "description": "what the court actually decided, in plain language"},
+                    "trick": {"type": "STRING", "description": "a short mnemonic for remembering this specific case and its holding"},
+                },
+                "required": ["case_name", "holding", "trick"],
+            },
+            "description": "2-4 genuinely relevant, real case laws for this topic - never invent a case that doesn't exist; if uncertain of a real case, omit it rather than fabricate one",
+        },
+        "part_c_scenario": {"type": "STRING", "description": "a fictional problem/fact-pattern for the applied-problem question (10 marks) - a realistic dispute involving named parties that tests this exact topic"},
+        "part_c_content": {"type": "STRING", "description": "the problem-answer walkthrough: identify the applicable law, apply it to the facts, address the likely counter-argument, state the remedy/decision - written as an exam-ready answer"},
+        "part_c_trick": {"type": "STRING", "description": "a short mnemonic for approaching this type of problem question in general"},
+    },
+    "required": [
+        "cluster_title", "one_line_core_idea", "real_life_scenario",
+        "part_a_content", "part_a_key_points", "part_a_trick",
+        "part_b_content", "part_b_case_laws",
+        "part_c_scenario", "part_c_content", "part_c_trick",
+    ],
+}
+
+
+def build_exam_cluster_prompt(subject_name, topic, pyq_info):
+    pyq_context = ""
+    if pyq_info:
+        pyq_context = (f"\n\nReal past-exam signal for this topic: asked {pyq_info.get('times_asked','?')} times "
+                       f"in years {', '.join(pyq_info.get('years_asked', []))}, typically appears as "
+                       f"{pyq_info.get('typical_part','')}, marks-weighted importance: {pyq_info.get('marks_weighted_importance','')}.")
+
+    return f"""You are writing one exam-preparation "cluster" for an Osmania University LL.B. student studying {subject_name}, on the topic: "{topic}".
+
+This must match a specific, already-proven study format that real students found genuinely useful for exam writing - not generic notes. The format has three layers, because Indian LL.B. exams ask about the same topic in three different question formats:
+
+LAYER 1 - PART A, SHORT NOTE (6 marks): concise, direct, exactly what a student would write for a short-note question. Include bold-first key points (each a short bolded keyword/phrase followed by its explanation) and end with a short memorable TRICK (a mnemonic) for recalling it under exam pressure.
+
+LAYER 2 - PART B, FULL ESSAY (15 marks): the comprehensive version of the same topic, written as a complete essay a student could copy into an answer sheet. Weave in 2-4 REAL, ACTUALLY EXISTING case laws naturally into the essay (never invent a case - if you are not confident a case is real, leave it out rather than fabricate a name or citation). Give each case its own short TRICK for remembering it.
+
+LAYER 3 - PART C, PROBLEM ANSWER (10 marks): invent a realistic fact-pattern/dispute involving named parties that tests this exact topic, then answer it properly: identify the applicable law, apply it to the facts, address the likely counter-argument, and state the remedy/decision. End with a TRICK for approaching this type of problem in general.
+
+Before all three layers, also give:
+- A ONE-LINE CORE IDEA: the whole topic in a single memorable sentence.
+- A REAL-LIFE SCENARIO: a short, relatable everyday situation with a named person, making the concept concrete before the technical content begins.
+{pyq_context}
+
+CRITICAL ACCURACY RULE: Every case name, citation, and section number must be genuinely real to the best of your knowledge. Never invent a case or citation to sound authoritative - a wrong case name in exam-prep material actively harms a student who memorizes and cites it. If uncertain, describe the legal principle without naming a specific case rather than guessing.
+
+Write in plain, confident, exam-ready English - this is content a student will directly write from, not content to further edit."""
+
+
+@app.route('/api/llb5-exam-cluster-daily', methods=['GET'])
+def llb5_exam_cluster_daily():
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not gemini_key or not site_token:
+        return jsonify({"ok": False, "error": "Server misconfiguration."}), 500
+
+    results = []
+    for subject, subject_name in LLB5_EXAM_CLUSTER_SUBJECTS.items():
+        try:
+            pyq_data, _ = github_get(llb5_pyq_analysis_file(subject), site_token, timeout=10)
+            if not pyq_data or not pyq_data.get("topics"):
+                results.append(f"{subject}: no PYQ data, skipped")
+                continue
+
+            existing_data, existing_sha = github_get(llb5_clusters_file(subject), site_token, timeout=10)
+            existing_clusters = existing_data.get("clusters", []) if existing_data else []
+            done_topics = {c["topic"] for c in existing_clusters}
+
+            # Rank by real exam signal - High importance first, then by how
+            # often it's actually been asked, so the most exam-relevant
+            # topics get their cluster built first, not just syllabus order.
+            importance_rank = {"High": 0, "Medium": 1, "Low": 2}
+            candidates = [t for t in pyq_data["topics"] if t["topic"] not in done_topics]
+            candidates.sort(key=lambda t: (importance_rank.get(t.get("marks_weighted_importance"), 3), -t.get("times_asked", 0)))
+
+            if not candidates:
+                results.append(f"{subject}: all PYQ-ranked topics already have clusters")
+                continue
+
+            next_topic = candidates[0]
+            prompt = build_exam_cluster_prompt(subject_name, next_topic["topic"], next_topic)
+            # Denser than a normal daily lecture (three full answer-formats
+            # plus case law, not one topic explanation) - budgeted well
+            # above the existing lecture generation's token limit to avoid
+            # the same silent-truncation bug found once before with the
+            # topic-index generator.
+            parsed = call_gemini_structured(gemini_key, prompt, LLB5_EXAM_CLUSTER_SCHEMA, max_tokens=16000, timeout=60)
+
+            new_cluster = {
+                "topic": next_topic["topic"],
+                "cluster_title": parsed.get("cluster_title", next_topic["topic"]),
+                "one_line_core_idea": parsed.get("one_line_core_idea", ""),
+                "real_life_scenario": parsed.get("real_life_scenario", ""),
+                "part_a_content": parsed.get("part_a_content", ""),
+                "part_a_key_points": parsed.get("part_a_key_points", []),
+                "part_a_trick": parsed.get("part_a_trick", ""),
+                "part_b_content": parsed.get("part_b_content", ""),
+                "part_b_case_laws": parsed.get("part_b_case_laws", []),
+                "part_c_scenario": parsed.get("part_c_scenario", ""),
+                "part_c_content": parsed.get("part_c_content", ""),
+                "part_c_trick": parsed.get("part_c_trick", ""),
+                "pyq_context": {"times_asked": next_topic.get("times_asked"), "marks_weighted_importance": next_topic.get("marks_weighted_importance")},
+                "generated_at": datetime.now(IST).isoformat(),
+            }
+            existing_clusters.append(new_cluster)
+            updated = {"subject": subject, "subject_name": subject_name, "clusters": existing_clusters}
+            github_put(llb5_clusters_file(subject), site_token, updated, existing_sha,
+                      f"LLB5 exam cluster: {subject} - {next_topic['topic']}")
+            results.append(f"{subject}: generated '{next_topic['topic']}' ({len(existing_clusters)} total)")
+        except Exception as e:
+            results.append(f"{subject}: FAILED - {str(e)[:200]}")
+
+    if bot_token and chat_id:
+        try:
+            msg = "📚 <b>Exam Cluster Notes - Daily Run</b>\n\n" + "\n".join(f"• {r}" for r in results)
+            for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+                send_telegram(bot_token, cid, msg)
+        except Exception:
+            pass
+
+    return jsonify({"ok": True, "results": results})
+
+
 def build_stone_structure_prompt(raw_search_text, stones):
     stone_list = "\n".join(f"- {s.get('stone_type','?')}: bill says ₹{s.get('rate_per_ct',0)}/ct" for s in stones)
     return f"""Convert this search research into clean structured numbers ONLY — no explanations, no paragraphs.
