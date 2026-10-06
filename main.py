@@ -7849,6 +7849,111 @@ def vehicle_check_auth():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Litigant Search (private, Durga + Sreekanth only) - official eCourtsIndia
+# Partner API proxy. The API key lives only in the ECOURTS_API_KEY env var and
+# never reaches the browser. Nothing about searched names is stored or logged.
+# ---------------------------------------------------------------------------
+ECOURTS_API_BASE = "https://webapi.ecourtsindia.com"
+_ECOURTS_CNR_RE = re.compile(r"^[A-Z]{4}\d{12}$")
+_ECOURTS_MATCH_MODES = {"all", "any", "phrase", "fuzzy"}
+_ecourts_calls = []  # per-instance timestamps, cheap guard on credit burn
+ECOURTS_MAX_CALLS_PER_HOUR = 120
+
+
+def _ecourts_rate_ok():
+    now = time.time()
+    while _ecourts_calls and now - _ecourts_calls[0] > 3600:
+        _ecourts_calls.pop(0)
+    if len(_ecourts_calls) >= ECOURTS_MAX_CALLS_PER_HOUR:
+        return False
+    _ecourts_calls.append(now)
+    return True
+
+
+def _ecourts_get(path, params=None):
+    key = os.environ.get("ECOURTS_API_KEY")
+    if not key:
+        return 500, {"ok": False, "error": "ECOURTS_API_KEY is not configured on the server."}
+    url = ECOURTS_API_BASE + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Bearer " + key,
+        "Accept": "application/json",
+        "User-Agent": "lawsticker-litigant-search/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return 200, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            detail = {}
+        msg = "eCourtsIndia returned an error."
+        if e.code in (401, 403):
+            msg = "eCourtsIndia rejected the API key (invalid, expired or out of credits)."
+        elif e.code == 402:
+            msg = "eCourtsIndia credits exhausted - top up at ecourtsindia.com."
+        elif e.code == 429:
+            msg = "eCourtsIndia rate limit hit - wait a minute and retry."
+        elif e.code == 404:
+            msg = "Not found."
+        return 502, {"ok": False, "error": msg, "upstream_status": e.code, "detail": detail}
+    except Exception as e:
+        return 502, {"ok": False, "error": "Could not reach eCourtsIndia: " + type(e).__name__}
+
+
+@app.route('/api/litigant-search', methods=['POST'])
+def litigant_search():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+
+    name = re.sub(r"\s+", " ", str(body.get("name", ""))).strip()
+    if len(name) < 3 or len(name) > 100:
+        return jsonify({"ok": False, "error": "Enter a name of 3 to 100 characters."}), 400
+    mode = body.get("match_mode", "all")
+    if mode not in _ECOURTS_MATCH_MODES:
+        mode = "all"
+    role = body.get("role", "any")
+    field = {"petitioner": "petitioners[]", "respondent": "respondents[]"}.get(role, "litigants[]")
+    try:
+        page = max(1, int(body.get("page", 1)))
+        page_size = min(100, max(1, int(body.get("page_size", 25))))
+    except (TypeError, ValueError):
+        page, page_size = 1, 25
+
+    if not _ecourts_rate_ok():
+        return jsonify({"ok": False, "error": "Hourly search limit reached (protects API credits). Try later."}), 429
+
+    params = [(field, name), ("nameMatchMode", mode), ("page", page), ("pageSize", page_size)]
+    state = str(body.get("state_code", "")).strip()
+    if state:
+        params.append(("courtCodes", state))
+    status, data = _ecourts_get("/api/partner/search", params)
+    if status != 200:
+        return jsonify(data), status
+    return jsonify({"ok": True, "result": data})
+
+
+@app.route('/api/litigant-case', methods=['POST'])
+def litigant_case():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+    cnr = str(body.get("cnr", "")).strip().upper()
+    if not _ECOURTS_CNR_RE.match(cnr):
+        return jsonify({"ok": False, "error": "Invalid CNR (expected 4 letters + 12 digits)."}), 400
+    if not _ecourts_rate_ok():
+        return jsonify({"ok": False, "error": "Hourly limit reached (protects API credits). Try later."}), 429
+    status, data = _ecourts_get("/api/partner/case/" + cnr)
+    if status != 200:
+        return jsonify(data), status
+    return jsonify({"ok": True, "result": data})
+
+
 X_PULSE_FILE = "x-pulse.json"
 
 
