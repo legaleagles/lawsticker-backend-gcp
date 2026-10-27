@@ -7954,6 +7954,253 @@ def litigant_case():
     return jsonify({"ok": True, "result": data})
 
 
+# ---------------------------------------------------------------------------
+# Sarukulu (sarukulu.html) - live grocery prices across quick-commerce apps
+# via QuickCommerce API (quickcommerceapi.com). The key lives only in the
+# QCOMMERCE_API_KEY env var. Nothing about the shopper is stored: only an
+# in-memory cache of public search results (2 h) to save credits.
+# Credits: 1 per platform per search. Guarded by a daily cap
+# (SARUKULU_DAILY_CREDITS, default 400) and a per-IP limit.
+# ---------------------------------------------------------------------------
+QCOMMERCE_API_BASE = "https://api.quickcommerceapi.com"
+SARUKULU_PLATFORMS = {  # our id -> QuickCommerce API platform value
+    "blinkit": "BlinkIt", "zepto": "Zepto", "instamart": "Swiggy", "bigbasket": "BigBasket",
+    "minutes": "Minutes", "jiomart": "JioMart", "dmart": "DMart", "amazon": "Amazon",
+}
+SARUKULU_NEEDS_PINCODE = {"minutes", "jiomart", "dmart"}
+SARUKULU_CACHE_TTL = 2 * 3600
+_sarukulu_cache = {}
+_sarukulu_credits = {"day": "", "used": 0}
+_sarukulu_ip_calls = {}
+
+
+def _sarukulu_platform_id(name):
+    n = re.sub(r"[^a-z]", "", str(name).lower())
+    for key, pid in (("blinkit", "blinkit"), ("zepto", "zepto"), ("swiggy", "instamart"), ("instamart", "instamart"),
+                     ("bigbasket", "bigbasket"), ("bbnow", "bigbasket"), ("minutes", "minutes"), ("flipkart", "minutes"),
+                     ("jiomart", "jiomart"), ("dmart", "dmart"), ("amazon", "amazon")):
+        if key in n:
+            return pid
+    return None
+
+
+def _sarukulu_num(v):
+    try:
+        if isinstance(v, dict):
+            v = v.get("value", v.get("amount"))
+        x = float(str(v).replace(",", "").replace("₹", "").strip())
+        return x if x > 0 else None
+    except Exception:
+        return None
+
+
+def _sarukulu_size(text):
+    """'2 x 500 ml' -> ('ml', 1000.0); '1 kg' -> ('g', 1000.0); '6 pcs' -> ('pcs', 6.0)."""
+    t = str(text or "").lower()
+    mult = 1.0
+    m = re.search(r"(\d+)\s*[x×]\s*(?=\d)", t)
+    if m:
+        mult = float(m.group(1))
+        t = t[m.end():]
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(kg|kgs|kilo|g|gm|gms|gram|grams|ml|l|ltr|litre|liter|lt|pcs|pc|pieces|piece|units|unit|n)\b", t)
+    if not m:
+        return None
+    val, unit = float(m.group(1)) * mult, m.group(2)
+    if unit in ("kg", "kgs", "kilo"):
+        return ("g", val * 1000)
+    if unit in ("g", "gm", "gms", "gram", "grams"):
+        return ("g", val)
+    if unit in ("l", "ltr", "litre", "liter", "lt"):
+        return ("ml", val * 1000)
+    if unit == "ml":
+        return ("ml", val)
+    return ("pcs", val)
+
+
+_SARUKULU_STOP = {"pcs", "pc", "pack", "packet", "of", "the", "and", "kg", "g", "ml", "l", "gm", "fresh", "bunch"}
+
+
+def _sarukulu_tokens(text):
+    return [w for w in re.findall(r"[a-z]+", str(text).lower()) if w not in _SARUKULU_STOP and len(w) > 1]
+
+
+def _sarukulu_score(product, query):
+    q_tokens = _sarukulu_tokens(query)
+    hay = " ".join(str(product.get(k) or "") for k in ("name", "brand", "qty")).lower()
+    score = (sum(1 for w in q_tokens if w in hay) / len(q_tokens)) if q_tokens else 0.5
+    qs, ps = _sarukulu_size(query), _sarukulu_size(product.get("qty") or product.get("name"))
+    if qs and ps:
+        if qs[0] == ps[0] and abs(qs[1] - ps[1]) < 0.01 * qs[1]:
+            score += 0.35
+        else:
+            score -= 0.2
+    if not product.get("available"):
+        score -= 0.6
+    return round(score, 3)
+
+
+def _sarukulu_product(raw):
+    if not isinstance(raw, dict):
+        return None
+    price = _sarukulu_num(raw.get("offer_price")) or _sarukulu_num(raw.get("price")) or _sarukulu_num(raw.get("selling_price"))
+    name = str(raw.get("name") or "").strip()
+    if not price or not name:
+        return None
+    avail = raw.get("availability", raw.get("available", True))
+    if isinstance(avail, str):
+        avail = avail.strip().lower() not in ("false", "0", "out_of_stock", "unavailable", "sold out", "no")
+    image = raw.get("image") or ""
+    imgs = raw.get("images")
+    if not image and isinstance(imgs, list) and imgs:
+        image = imgs[0] if isinstance(imgs[0], str) else (imgs[0] or {}).get("url", "")
+    return {
+        "pid": str(raw.get("id") or raw.get("item_id") or name)[:120],
+        "name": name[:160],
+        "brand": str(raw.get("brand") or "")[:60],
+        "qty": str(raw.get("quantity") or "")[:40],
+        "price": price,
+        "mrp": _sarukulu_num(raw.get("mrp")),
+        "available": bool(avail),
+        "link": str(raw.get("deeplink") or "")[:500],
+        "image": str(image)[:500],
+    }
+
+
+def _sarukulu_group_results(data):
+    """Return {our_platform_id: [raw products]} from a groupsearch response, tolerant of shape."""
+    out = {}
+    d = data.get("data", data) if isinstance(data, dict) else {}
+    results = d.get("results") if isinstance(d, dict) else None
+    if isinstance(results, dict):
+        for pname, lst in results.items():
+            pid = _sarukulu_platform_id(pname)
+            if pid and isinstance(lst, list):
+                out.setdefault(pid, []).extend(lst)
+            elif pid and isinstance(lst, dict) and isinstance(lst.get("products"), list):
+                out.setdefault(pid, []).extend(lst["products"])
+    elif isinstance(results, list) or isinstance(d.get("products") if isinstance(d, dict) else None, list):
+        for p in (results if isinstance(results, list) else d["products"]):
+            plat = p.get("platform") if isinstance(p, dict) else None
+            pid = _sarukulu_platform_id(plat.get("name") if isinstance(plat, dict) else plat)
+            if pid:
+                out.setdefault(pid, []).append(p)
+    return out
+
+
+def _sarukulu_day():
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+
+
+def _sarukulu_spend(n):
+    cap = int(os.environ.get("SARUKULU_DAILY_CREDITS", "400"))
+    day = _sarukulu_day()
+    if _sarukulu_credits["day"] != day:
+        _sarukulu_credits.update(day=day, used=0)
+    if _sarukulu_credits["used"] + n > cap:
+        return False
+    _sarukulu_credits["used"] += n
+    return True
+
+
+def _sarukulu_groupsearch(query, platforms, lat, lon, pincode):
+    key = os.environ.get("QCOMMERCE_API_KEY")
+    if not key:
+        return None, "not_configured"
+    cache_key = (query.lower(), tuple(sorted(platforms)), round(lat, 3), round(lon, 3), pincode)
+    hit = _sarukulu_cache.get(cache_key)
+    if hit and time.time() - hit[0] < SARUKULU_CACHE_TTL:
+        return hit[1], None
+    if not _sarukulu_spend(len(platforms)):
+        return None, "daily_cap"
+    params = {"q": query, "lat": lat, "lon": lon, "platforms": ",".join(SARUKULU_PLATFORMS[p] for p in platforms)}
+    if pincode:
+        params["pincode"] = pincode
+    req = urllib.request.Request(QCOMMERCE_API_BASE + "/v1/groupsearch?" + urllib.parse.urlencode(params), headers={
+        "X-API-Key": key, "Accept": "application/json", "User-Agent": "lawsticker-sarukulu/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return None, {401: "bad_key", 402: "no_credits", 422: "bad_request", 429: "rate_limited", 504: "timeout"}.get(e.code, "upstream_%d" % e.code)
+    except Exception as e:
+        return None, "unreachable_" + type(e).__name__
+    grouped = _sarukulu_group_results(data)
+    result = {}
+    for pid in platforms:
+        prods = [x for x in (_sarukulu_product(r) for r in grouped.get(pid, [])) if x]
+        for p in prods:
+            p["score"] = _sarukulu_score(p, query)
+        prods.sort(key=lambda p: (-p["score"], p["price"]))
+        result[pid] = prods[:8]
+    result["_credits_remaining"] = data.get("credits_remaining") if isinstance(data, dict) else None
+    _sarukulu_cache[cache_key] = (time.time(), result)
+    if len(_sarukulu_cache) > 3000:
+        for k in sorted(_sarukulu_cache, key=lambda k: _sarukulu_cache[k][0])[:1000]:
+            _sarukulu_cache.pop(k, None)
+    return result, None
+
+
+def _sarukulu_ip_ok(ip, n):
+    now = time.time()
+    calls = [t for t in _sarukulu_ip_calls.get(ip, []) if now - t < 600]
+    if len(calls) + n > 60:
+        _sarukulu_ip_calls[ip] = calls
+        return False
+    _sarukulu_ip_calls[ip] = calls + [now] * n
+    return True
+
+
+@app.route('/api/sarukulu/status', methods=['GET'])
+def sarukulu_status():
+    _sarukulu_spend(0)
+    return jsonify({"ok": True, "configured": bool(os.environ.get("QCOMMERCE_API_KEY")),
+                    "platforms": sorted(SARUKULU_PLATFORMS), "needs_pincode": sorted(SARUKULU_NEEDS_PINCODE),
+                    "used_today": _sarukulu_credits["used"], "daily_cap": int(os.environ.get("SARUKULU_DAILY_CREDITS", "400"))})
+
+
+@app.route('/api/sarukulu/fetch', methods=['POST'])
+def sarukulu_fetch():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        lat, lon = float(body.get("lat")), float(body.get("lon"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "location_missing"}), 400
+    if not (6 <= lat <= 37 and 68 <= lon <= 98):
+        return jsonify({"ok": False, "error": "location_outside_india"}), 400
+    pincode = re.sub(r"\D", "", str(body.get("pincode") or ""))[:6]
+    pincode = pincode if len(pincode) == 6 else ""
+    platforms = [p for p in (body.get("platforms") or []) if p in SARUKULU_PLATFORMS]
+    platforms = [p for p in dict.fromkeys(platforms) if pincode or p not in SARUKULU_NEEDS_PINCODE]
+    items = []
+    for it in (body.get("items") or [])[:8]:
+        q = re.sub(r"\s+", " ", str((it or {}).get("q") or "")).strip()[:80]
+        if q:
+            items.append((str(it.get("id") or q)[:40], q))
+    if not platforms or not items:
+        return jsonify({"ok": False, "error": "nothing_to_fetch"}), 400
+    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+    if not _sarukulu_ip_ok(ip, len(items)):
+        return jsonify({"ok": False, "error": "too_many_requests"}), 429
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {iid: pool.submit(_sarukulu_groupsearch, q, platforms, lat, lon, pincode) for iid, q in items}
+    results, errors, remaining = {}, {}, None
+    for iid, fut in futures.items():
+        res, err = fut.result()
+        if err:
+            errors[iid] = err
+            continue
+        remaining = res.get("_credits_remaining", remaining)
+        results[iid] = {p: res.get(p, []) for p in platforms}
+    if not results and errors:
+        first = next(iter(errors.values()))
+        status = 503 if first in ("not_configured", "daily_cap", "no_credits", "bad_key") else 502
+        return jsonify({"ok": False, "error": first, "errors": errors}), status
+    return jsonify({"ok": True, "results": results, "errors": errors, "platforms": platforms,
+                    "credits_remaining": remaining, "fetched_at": int(time.time())})
+
+
 X_PULSE_FILE = "x-pulse.json"
 
 
