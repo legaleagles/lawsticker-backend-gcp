@@ -8201,6 +8201,139 @@ def sarukulu_fetch():
                     "credits_remaining": remaining, "fetched_at": int(time.time())})
 
 
+# ---------------------------------------------------------------------------
+# Jewellery Suite feedback recorder.
+# The site repo is PUBLIC, so only anonymous fields are saved to it (rating,
+# category, short comment, context). The optional contact detail goes ONLY to
+# the Telegram alert and is never written to the repo.
+# ---------------------------------------------------------------------------
+JEWELLERY_FEEDBACK_FILE = "jewellery-feedback.json"
+_JF_CATEGORIES = {"bug", "idea", "wrong_price", "praise", "other"}
+_JF_MAX_STORED = 1000
+_jf_hits = {}  # ip -> [timestamps]; per-instance, cheap spam brake
+
+
+def _jf_ip():
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return (fwd.split(",")[0].strip() if fwd else request.remote_addr) or "?"
+
+
+def _jf_rate_ok(ip, limit=5, window=3600):
+    now = time.time()
+    hits = [t for t in _jf_hits.get(ip, []) if now - t < window]
+    if len(hits) >= limit:
+        _jf_hits[ip] = hits
+        return False
+    hits.append(now)
+    _jf_hits[ip] = hits
+    if len(_jf_hits) > 2000:
+        for k in list(_jf_hits)[:1000]:
+            _jf_hits.pop(k, None)
+    return True
+
+
+def _jf_clean(v, n):
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", str(v or ""))).strip()[:n]
+
+
+@app.route('/api/jewellery-feedback', methods=['POST'])
+def jewellery_feedback_submit():
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("website"):  # honeypot field, humans never fill it
+        return jsonify({"ok": True})
+    try:
+        rating = int(body.get("rating", 0))
+    except (TypeError, ValueError):
+        rating = 0
+    if rating < 1 or rating > 5:
+        return jsonify({"ok": False, "error": "Please pick a star rating (1-5)."}), 400
+    category = body.get("category", "other")
+    if category not in _JF_CATEGORIES:
+        category = "other"
+    message = _jf_clean(body.get("message"), 600)
+    contact = _jf_clean(body.get("contact"), 80)
+    if category in ("bug", "wrong_price", "idea") and len(message) < 5:
+        return jsonify({"ok": False, "error": "Please add a few words so we can act on it."}), 400
+    if not _jf_rate_ok(_jf_ip()):
+        return jsonify({"ok": False, "error": "Too many submissions - please try again later."}), 429
+
+    entry = {
+        "id": hashlib.sha1((str(time.time()) + _jf_ip()).encode()).hexdigest()[:10],
+        "at": datetime.now(timezone.utc).isoformat(),
+        "rating": rating,
+        "category": category,
+        "message": message,
+        "metal": _jf_clean(body.get("metal"), 10),
+        "mode": _jf_clean(body.get("mode"), 12),
+        "lang": _jf_clean(body.get("lang"), 3),
+    }
+    token = os.environ.get("SITE_REPO_TOKEN")
+    saved = False
+    if token:
+        try:
+            def upd(existing):
+                data = existing if isinstance(existing, dict) else {}
+                items = data.get("items", [])
+                items.append(entry)
+                data["items"] = items[-_JF_MAX_STORED:]
+                data["total_ever"] = int(data.get("total_ever", 0)) + 1
+                return data
+            github_get_put_with_retry(JEWELLERY_FEEDBACK_FILE, token, upd, "Jewellery suite feedback")
+            saved = True
+        except Exception:
+            saved = False
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if bot_token and chat_id:
+        try:
+            import html as _html
+            stars = "\u2605" * rating + "\u2606" * (5 - rating)
+            text = ("<b>Jewellery Suite feedback</b>\n" + stars + " - " + _html.escape(category) +
+                    "\nTab: " + _html.escape(entry["metal"] or "?") + " / " + _html.escape(entry["mode"] or "?") +
+                    " / " + _html.escape(entry["lang"] or "?") +
+                    ("\n\n" + _html.escape(message) if message else "") +
+                    ("\n\nContact: " + _html.escape(contact) if contact else ""))
+            send_telegram_to_all(bot_token, chat_id, text)
+        except Exception:
+            pass
+    if not saved and not (bot_token and chat_id):
+        return jsonify({"ok": False, "error": "Feedback could not be recorded right now."}), 503
+    return jsonify({"ok": True})
+
+
+@app.route('/api/jewellery-feedback-summary', methods=['GET'])
+def jewellery_feedback_summary():
+    # Public, aggregate-only: average + count, shown on the page only once
+    # there are enough ratings to mean something.
+    token = os.environ.get("SITE_REPO_TOKEN")
+    try:
+        data, _ = github_get(JEWELLERY_FEEDBACK_FILE, token, timeout=8) if token else (None, None)
+    except Exception:
+        data = None
+    items = (data or {}).get("items", [])
+    n = len(items)
+    avg = round(sum(i.get("rating", 0) for i in items) / n, 1) if n else 0
+    resp = jsonify({"ok": True, "count": n, "average": avg})
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.route('/api/jewellery-feedback-list', methods=['POST'])
+def jewellery_feedback_list():
+    body = request.get_json(force=True, silent=True) or {}
+    if not check_tender_scrutiny_password(body.get("password", "")):
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+    token = os.environ.get("SITE_REPO_TOKEN")
+    try:
+        data, _ = github_get(JEWELLERY_FEEDBACK_FILE, token, timeout=10) if token else (None, None)
+    except Exception:
+        return jsonify({"ok": False, "error": "Could not read feedback."}), 502
+    items = list((data or {}).get("items", []))
+    items.reverse()
+    return jsonify({"ok": True, "items": items, "total_ever": (data or {}).get("total_ever", len(items))})
+
+
 X_PULSE_FILE = "x-pulse.json"
 
 
