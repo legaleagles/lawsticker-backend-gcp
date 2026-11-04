@@ -438,15 +438,24 @@ def live_gold_rate():
         # existing international-spot estimate so callers that always
         # expect a silver figure (e.g. jewellery-suite.html) don't break.
         silver_999 = None
+        silver_source = "estimate"
         try:
-            silver = fetch_json("https://api.gold-api.com/price/XAG")
-            fx = fetch_json("https://open.er-api.com/v6/latest/USD")
-            usd_to_inr = fx["rates"]["INR"]
-            config, _ = github_get(CONFIG_FILE, os.environ.get("SITE_REPO_TOKEN"), timeout=8)
-            silver_premium = ((config or {}).get("rates", {})).get("silver_india_premium_pct", 32)
-            silver_999 = compute_rate(silver["price"], usd_to_inr, silver_premium)
+            real_silver, _, _ = fetch_real_silver_rate(city)
+            if real_silver:
+                silver_999 = real_silver["999"]
+                silver_source = "goodreturns_real"
         except Exception:
             pass
+        if not silver_999:
+            try:
+                silver = fetch_json("https://api.gold-api.com/price/XAG")
+                fx = fetch_json("https://open.er-api.com/v6/latest/USD")
+                usd_to_inr = fx["rates"]["INR"]
+                config, _ = github_get(CONFIG_FILE, os.environ.get("SITE_REPO_TOKEN"), timeout=8)
+                silver_premium = ((config or {}).get("rates", {})).get("silver_india_premium_pct", 32)
+                silver_999 = compute_rate(silver["price"], usd_to_inr, silver_premium)
+            except Exception:
+                pass
 
         return jsonify({
             "ok": True,
@@ -454,7 +463,8 @@ def live_gold_rate():
             "city": matched_city,
             "gold_by_purity_per_gram_inr": gold_by_purity,
             "silver_999_per_gram_inr": silver_999,
-            "note": "24K/22K/18K are the real published rate for this city; 20K/14K are derived from the real 24K figure since those aren't published directly. Silver is still an estimate, not yet from a real published source.",
+            "silver_source": silver_source,
+            "note": "24K/22K/18K are the real published rate for this city; 20K/14K are derived from the real 24K figure since those aren't published directly. Silver is the real published city rate when silver_source is goodreturns_real, otherwise an international-spot estimate.",
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -4640,6 +4650,9 @@ def extract_silver_prices(text):
     # silver", plain "silver rate ... is ₹X per gram") - multiple patterns
     # tried in order, first match wins.
     patterns = [
+        # Wording seen on the live Hyderabad page: "The price of silver in
+        # Hyderabad today is ₹220 per gram and ₹2,20,000 per kilogram."
+        r"price of silver in [A-Za-z ]{2,30}? today is\s*(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)\s*per gram",
         r"(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)\s*per gram for (?:999|fine)(?:\s*purity)?\s*silver",
         r"silver rate.{0,60}?(?:in|for)\s*\w+.{0,30}?(?:is|:)\s*(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)\s*per gram",
         r"Silver Rate Today.{0,80}?(?:₹|Rs\.?)\s*([\d,]+(?:\.\d+)?)",
@@ -4648,9 +4661,13 @@ def extract_silver_prices(text):
         m = re.search(p, text, re.IGNORECASE | re.DOTALL)
         if m:
             try:
-                return float(m.group(1).replace(",", ""))
+                v = float(m.group(1).replace(",", ""))
             except ValueError:
                 continue
+            # Sanity bound: a per-gram 999 silver rate outside this range
+            # means the pattern grabbed some other number - never use it.
+            if 20 <= v <= 2000:
+                return v
     return None
 
 
