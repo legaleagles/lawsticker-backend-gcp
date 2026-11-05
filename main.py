@@ -9234,5 +9234,360 @@ def health():
     ]})
 
 
+
+# ---------------------------------------------------------------------------
+# Gold & Silver "direction sense" — Jewellery Suite's Direction tab.
+#
+# Explains what is pushing gold/silver right now and which way each push
+# points, plus an AI "today's read" with if-then scenarios for the day's
+# scheduled events. Deliberately NOT a price forecast and never a buy/sell
+# call: leans are "up / down / mixed" with confidence capped at "medium",
+# and the endpoint keeps an honest public track record of how often the
+# lean actually matched the next move.
+#
+# Market data: Yahoo Finance chart API (free, no key), Stooq CSV as a
+# per-series fallback. Cached in memory 15 min. Nothing written for it.
+# AI read: two-phase like Legal Update (grounded search -> structured
+# trilingual extraction), at most one per slot (morning before 5 PM IST,
+# evening after), stored in metal-direction.json. Generated lazily on the
+# first ?generate=1 visit of a slot — no cron needed, though a cron hitting
+# ?generate=1 at ~8:30 AM and ~5:30 PM IST will pre-warm it.
+# Both Gemini calls go through the shared helpers, so they're logged in
+# the AI usage dashboard automatically (action: _generate_metal_read).
+# ---------------------------------------------------------------------------
+import threading
+
+METAL_DIRECTION_FILE = "metal-direction.json"
+
+MD_SERIES = {
+    # key: (yahoo symbol, stooq symbol, label)
+    "gold":   ("GC=F",     "xauusd",  "Gold (US$/oz)"),
+    "silver": ("SI=F",     "xagusd",  "Silver (US$/oz)"),
+    "dxy":    ("DX-Y.NYB", "dx.f",    "US Dollar Index"),
+    "us10y":  ("^TNX",     "10usy.b", "US 10-yr yield (%)"),
+    "usdinr": ("INR=X",    "usdinr",  "US$ to ₹"),
+    "copper": ("HG=F",     "hg.f",    "Copper (US$/lb)"),
+    "vix":    ("^VIX",     None,      "Fear index (VIX)"),
+}
+
+_md_lock = threading.Lock()
+_md_market_cache = {"at": 0, "data": None}
+_md_read_cache = {"at": 0, "data": None, "sha": None}
+_md_fail = {"at": 0, "error": None}
+
+
+def _md_fetch_text(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; lawsticker-ai/1.0)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def _md_closes_yahoo(symbol):
+    raw = _md_fetch_text(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=2mo&interval=1d")
+    res = json.loads(raw)["chart"]["result"][0]
+    closes = res["indicators"]["quote"][0]["close"]
+    out = [float(c) for c in closes if c is not None]
+    live = (res.get("meta") or {}).get("regularMarketPrice")
+    if live and out and abs(float(live) - out[-1]) / out[-1] < 0.2:
+        out[-1] = float(live)
+    return out
+
+
+def _md_closes_stooq(symbol):
+    raw = _md_fetch_text(f"https://stooq.com/q/d/l/?s={symbol}&i=d")
+    rows = [r.split(",") for r in raw.strip().splitlines()[1:]]
+    out = []
+    for r in rows[-45:]:
+        try:
+            out.append(float(r[4]))
+        except Exception:
+            pass
+    return out
+
+
+def _md_pct(a, b):
+    return round((a - b) / b * 100, 2) if b else None
+
+
+def _md_series_stats(closes, absolute=False):
+    if len(closes) < 6:
+        return None
+    last = closes[-1]
+    def chg(n):
+        if len(closes) <= n:
+            return None
+        base = closes[-1 - n]
+        return round(last - base, 3) if absolute else _md_pct(last, base)
+    return {
+        "last": round(last, 4),
+        "chg_1d": chg(1), "chg_5d": chg(5), "chg_20d": chg(20),
+        "spark": [round(c, 4) for c in closes[-22:]],
+        "unit": "pts" if absolute else "%",
+    }
+
+
+def _md_effect(key, s):
+    # +1 = tends to push the metal UP, -1 = DOWN, 0 = neutral.
+    # Thresholds are deliberately generous so small noise reads as neutral.
+    if not s or s.get("chg_5d") is None:
+        return 0, 0
+    c = s["chg_5d"]
+    if key == "dxy":
+        e = -1 if c > 0.4 else (1 if c < -0.4 else 0)
+        return e, e
+    if key == "us10y":   # absolute change in percentage points
+        e = -1 if c > 0.08 else (1 if c < -0.08 else 0)
+        return e, e
+    if key == "usdinr":  # weaker rupee -> higher price in India
+        e = 1 if c > 0.25 else (-1 if c < -0.25 else 0)
+        return e, e
+    if key == "copper":  # industrial mood matters for silver only
+        return 0, (1 if c > 2 else (-1 if c < -2 else 0))
+    if key == "vix":     # fear spikes help gold as a safe haven
+        return (1 if c > 15 else (-1 if c < -15 else 0)), 0
+    if key in ("gold", "silver"):  # recent trend / momentum
+        thr = 1.5 if key == "gold" else 2.5
+        e = 1 if c > thr else (-1 if c < -thr else 0)
+        return (e, 0) if key == "gold" else (0, e)
+    return 0, 0
+
+
+def md_market_snapshot(force=False):
+    now = time.time()
+    if not force and _md_market_cache["data"] and now - _md_market_cache["at"] < 900:
+        return _md_market_cache["data"]
+    series, sources = {}, {}
+    for key, (ysym, ssym, label) in MD_SERIES.items():
+        closes, src = [], None
+        try:
+            closes, src = _md_closes_yahoo(ysym), "yahoo"
+        except Exception:
+            closes = []
+        if len(closes) < 6 and ssym:
+            try:
+                closes, src = _md_closes_stooq(ssym), "stooq"
+            except Exception:
+                closes = []
+        st = _md_series_stats(closes, absolute=(key == "us10y"))
+        if st:
+            st["label"] = label
+            st["source"] = src
+            series[key] = st
+    drivers, tally = [], {"gold": 0, "silver": 0}
+    for key in ("dxy", "us10y", "usdinr", "vix", "copper", "gold", "silver"):
+        s = series.get(key)
+        if not s:
+            continue
+        eg, es = _md_effect(key, s)
+        tally["gold"] += eg
+        tally["silver"] += es
+        drivers.append({"key": key, "effect_gold": eg, "effect_silver": es})
+    def lean(t):
+        return "up" if t >= 2 else ("down" if t <= -2 else "mixed")
+    data = {
+        "series": series,
+        "drivers": drivers,
+        "tally": tally,
+        "tally_lean": {"gold": lean(tally["gold"]), "silver": lean(tally["silver"])},
+        "as_of": datetime.now(IST).isoformat(),
+        "ok": bool(series.get("gold")),
+    }
+    if data["ok"]:
+        _md_market_cache.update(at=now, data=data)
+    return data
+
+
+def _md_slot(now=None):
+    now = now or datetime.now(IST)
+    return f"{now.date().isoformat()}-{'pm' if now.hour >= 17 else 'am'}"
+
+
+def _md_load_reads(site_token, force=False):
+    now = time.time()
+    if not force and _md_read_cache["data"] is not None and now - _md_read_cache["at"] < 300:
+        return _md_read_cache["data"], _md_read_cache["sha"]
+    try:
+        data, sha = github_get(METAL_DIRECTION_FILE, site_token, timeout=8)
+    except Exception:
+        data, sha = None, None
+    if not isinstance(data, dict):
+        data = {"history": {}}
+    data.setdefault("history", {})
+    _md_read_cache.update(at=now, data=data, sha=sha)
+    return data, sha
+
+
+MD_READ_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "gold_lean": {"type": "STRING", "enum": ["up", "down", "mixed"]},
+        "silver_lean": {"type": "STRING", "enum": ["up", "down", "mixed"]},
+        "confidence": {"type": "STRING", "enum": ["low", "medium"]},
+        "headline_en": {"type": "STRING"}, "headline_te": {"type": "STRING"}, "headline_hi": {"type": "STRING"},
+        "summary_en": {"type": "STRING"}, "summary_te": {"type": "STRING"}, "summary_hi": {"type": "STRING"},
+        "watch_en": {"type": "STRING"}, "watch_te": {"type": "STRING"}, "watch_hi": {"type": "STRING"},
+        "events": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "when_ist": {"type": "STRING"},
+                    "name_en": {"type": "STRING"}, "name_te": {"type": "STRING"}, "name_hi": {"type": "STRING"},
+                    "if_then_en": {"type": "STRING"}, "if_then_te": {"type": "STRING"}, "if_then_hi": {"type": "STRING"},
+                },
+                "required": ["when_ist", "name_en", "name_te", "name_hi", "if_then_en", "if_then_te", "if_then_hi"],
+            },
+        },
+    },
+    "required": ["gold_lean", "silver_lean", "confidence",
+                 "headline_en", "headline_te", "headline_hi",
+                 "summary_en", "summary_te", "summary_hi",
+                 "watch_en", "watch_te", "watch_hi", "events"],
+}
+
+
+def _md_market_brief(m):
+    lines = []
+    for k, s in (m.get("series") or {}).items():
+        lines.append(f"- {s['label']}: last {s['last']}, 1-day {s['chg_1d']}{s['unit']}, 5-day {s['chg_5d']}{s['unit']}, 20-day {s['chg_20d']}{s['unit']}")
+    t = m.get("tally", {})
+    lines.append(f"- Rule-based signal tally: gold {t.get('gold')}, silver {t.get('silver')} (positive = pushes up)")
+    return "\n".join(lines) or "- (market data unavailable right now)"
+
+
+def _generate_metal_read(gemini_key, market):
+    now = datetime.now(IST)
+    search_prompt = f"""Today is {now.strftime('%A %d %B %Y')}, {now.strftime('%I:%M %p')} India time (IST).
+
+Search the latest news and report, in plain text with dates:
+1. The main reasons gold and silver prices moved in the last 24-48 hours (international and in India).
+2. Scheduled events in the next 24-36 hours that usually move gold/silver: US data releases (CPI, jobs/NFP, PCE, GDP, jobless claims), Federal Reserve decisions or speeches, RBI announcements, ECB, China data, major geopolitical deadlines. Give each one's time converted to IST and what markets expect, where reported.
+3. Any India-specific factors right now: rupee moves, import duty changes, festival or wedding-season demand, RBI gold buying.
+Report facts only. Do NOT predict prices."""
+    raw_text, sources = call_gemini_grounded(gemini_key, search_prompt, max_tokens=1800)
+    if not raw_text or not sources:
+        raise RuntimeError("No grounded news found")
+
+    extract_prompt = f"""You write a short daily "direction sense" note about gold and silver for ordinary Indian families (many buy jewellery, few trade). English, Telugu and Hindi. Plain, simple words — no jargon without a short explanation.
+
+NEWS (from a real search, use only facts present here):
+{raw_text[:6000]}
+
+LIVE MARKET NUMBERS:
+{_md_market_brief(market)}
+
+Rules — follow strictly:
+- This is NOT a price forecast and NOT investment advice. Never say buy, sell, invest, book profit, or give a target price.
+- gold_lean / silver_lean: which way the CURRENT pushes point for the next day or two: "up", "down" or "mixed". Use "mixed" whenever forces genuinely conflict.
+- confidence: "low" or "medium" only. Day-to-day moves are close to a coin toss; never claim more.
+- headline_*: one line, under 14 words, says the lean and the main reason.
+- summary_*: 2-3 short sentences: what moved prices recently and what is pushing now.
+- events: up to 4 scheduled events from the NEWS in the next 24-36 hours, soonest first. when_ist like "Today 7:00 PM" or "Fri 6:00 PM". if_then_* must be a two-sided scenario, e.g. "If US inflation comes in hotter than expected, the dollar usually rises and gold tends to dip; if cooler, gold tends to rise." Leave the list empty if there are none — never invent an event.
+- watch_*: one line on the single most useful thing to keep an eye on.
+- Telugu and Hindi must be natural everyday language, not word-for-word translation. Keep numbers and times identical across languages."""
+    parsed = call_gemini_structured(gemini_key, extract_prompt, MD_READ_SCHEMA, max_tokens=4000, timeout=60)
+    if not parsed or not parsed.get("headline_en"):
+        raise RuntimeError("Extraction failed")
+    for k in ("gold_lean", "silver_lean"):
+        if parsed.get(k) not in ("up", "down", "mixed"):
+            parsed[k] = "mixed"
+    if parsed.get("confidence") not in ("low", "medium"):
+        parsed["confidence"] = "low"
+    parsed["events"] = (parsed.get("events") or [])[:4]
+    seen, srcs = set(), []
+    for s in sources:
+        if s["uri"] not in seen:
+            seen.add(s["uri"])
+            srcs.append({"uri": s["uri"], "title": (s.get("title") or "")[:80]})
+    parsed["sources"] = srcs[:4]
+    return parsed
+
+
+def _md_track_record(history):
+    # Honest scorekeeping: for each read with a non-mixed lean, did the
+    # price at the NEXT read move the way the lean pointed? Mixed leans
+    # are counted separately, not as wins.
+    keys = sorted(history.keys())
+    out = {}
+    for metal, px in (("gold", "gold_usd"), ("silver", "silver_usd")):
+        n = hit = mixed = 0
+        for a, b in zip(keys, keys[1:]):
+            ea, eb = history[a], history[b]
+            pa, pb = ea.get(px), eb.get(px)
+            ln = ea.get(f"{metal}_lean")
+            if not pa or not pb:
+                continue
+            if ln == "mixed":
+                mixed += 1
+                continue
+            if ln not in ("up", "down"):
+                continue
+            n += 1
+            if (pb > pa and ln == "up") or (pb < pa and ln == "down"):
+                hit += 1
+        out[metal] = {"called": n, "matched": hit, "mixed": mixed}
+    return out
+
+
+@app.route('/api/metal-direction', methods=['GET'])
+def metal_direction():
+    site_token = os.environ.get("SITE_REPO_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    want_generate = request.args.get("generate") == "1"
+    try:
+        market = md_market_snapshot()
+    except Exception as e:
+        market = {"ok": False, "error": str(e)}
+
+    if not site_token:
+        return jsonify({"ok": market.get("ok", False), "market": market, "read": None, "read_fresh": False})
+
+    slot = _md_slot()
+    data, sha = _md_load_reads(site_token)
+    read_error = None
+
+    if want_generate and slot not in data["history"] and gemini_key:
+        # Back off for 20 min after a failure so a broken upstream can't
+        # make every page view burn another Gemini call.
+        if time.time() - _md_fail["at"] < 1200:
+            read_error = "Today's read is not ready yet. Please check back a little later."
+        else:
+            with _md_lock:
+                data, sha = _md_load_reads(site_token, force=True)
+                if slot not in data["history"]:
+                    try:
+                        parsed = _generate_metal_read(gemini_key, market)
+                        s = (market or {}).get("series", {})
+                        parsed.update({
+                            "slot": slot,
+                            "generated_at": datetime.now(IST).isoformat(),
+                            "gold_usd": (s.get("gold") or {}).get("last"),
+                            "silver_usd": (s.get("silver") or {}).get("last"),
+                        })
+                        data["history"][slot] = parsed
+                        if len(data["history"]) > 120:
+                            for old in sorted(data["history"])[:-120]:
+                                del data["history"][old]
+                        github_put(METAL_DIRECTION_FILE, site_token, data, sha, f"Metal direction read: {slot}", timeout=20)
+                        _md_read_cache.update(at=0, data=None, sha=None)
+                        _md_fail.update(at=0, error=None)
+                    except Exception as e:
+                        _md_fail.update(at=time.time(), error=str(e))
+                        read_error = "Today's read could not be prepared right now. Showing the latest one."
+
+    hist = data.get("history", {})
+    latest_key = sorted(hist)[-1] if hist else None
+    return jsonify({
+        "ok": bool(market.get("ok")) or bool(latest_key),
+        "market": market,
+        "read": hist.get(latest_key) if latest_key else None,
+        "read_fresh": latest_key == slot,
+        "slot": slot,
+        "read_error": read_error,
+        "track": _md_track_record(hist),
+    })
+
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
