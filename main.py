@@ -9286,11 +9286,17 @@ def _md_closes_yahoo(symbol):
     raw = _md_fetch_text(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=2mo&interval=1d")
     res = json.loads(raw)["chart"]["result"][0]
     closes = res["indicators"]["quote"][0]["close"]
-    out = [float(c) for c in closes if c is not None]
+    stamps = res.get("timestamp") or []
+    pairs = []
+    for i, c in enumerate(closes):
+        if c is None:
+            continue
+        d = datetime.fromtimestamp(stamps[i], IST).date().isoformat() if i < len(stamps) else None
+        pairs.append((d, float(c)))
     live = (res.get("meta") or {}).get("regularMarketPrice")
-    if live and out and abs(float(live) - out[-1]) / out[-1] < 0.2:
-        out[-1] = float(live)
-    return out
+    if live and pairs and abs(float(live) - pairs[-1][1]) / pairs[-1][1] < 0.2:
+        pairs[-1] = (pairs[-1][0], float(live))
+    return pairs
 
 
 def _md_closes_stooq(symbol):
@@ -9299,7 +9305,7 @@ def _md_closes_stooq(symbol):
     out = []
     for r in rows[-45:]:
         try:
-            out.append(float(r[4]))
+            out.append((r[0], float(r[4])))
         except Exception:
             pass
     return out
@@ -9309,7 +9315,11 @@ def _md_pct(a, b):
     return round((a - b) / b * 100, 2) if b else None
 
 
-def _md_series_stats(closes, absolute=False):
+def _md_series_stats(pairs, absolute=False):
+    if len(pairs) < 6:
+        return None
+    closes = [c for _, c in pairs]
+    dates = [d for d, _ in pairs]
     if len(closes) < 6:
         return None
     last = closes[-1]
@@ -9322,6 +9332,7 @@ def _md_series_stats(closes, absolute=False):
         "last": round(last, 4),
         "chg_1d": chg(1), "chg_5d": chg(5), "chg_20d": chg(20),
         "spark": [round(c, 4) for c in closes[-22:]],
+        "dates": dates[-22:],
         "unit": "pts" if absolute else "%",
     }
 
