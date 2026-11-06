@@ -1,0 +1,25 @@
+# Prepares the Gold & Silver "Direction" read twice a day so visitors never
+# wait for it. Just pings the live endpoint - needs no secrets.
+# 03:01 UTC = 8:31 AM IST, 12:01 UTC = 5:31 PM IST (GitHub may run it a few
+# minutes late; the page still makes its own read if a visitor comes first).
+name: Metal direction daily read
+
+on:
+  schedule:
+    - cron: '1 3 * * *'
+    - cron: '1 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare today's read
+        run: |
+          for i in 1 2 3; do
+            out=$(curl -s -m 120 'https://lawsticker-backend-494996217030.europe-west1.run.app/api/metal-direction?generate=1')
+            echo "$out" | head -c 400; echo
+            if echo "$out" | grep -q '"read_fresh":true'; then echo "Fresh read ready"; exit 0; fi
+            sleep 60
+          done
+          echo "Read not fresh after 3 tries"; exit 1
