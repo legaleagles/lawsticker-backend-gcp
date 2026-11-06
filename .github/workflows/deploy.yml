@@ -1,3 +1,4 @@
+# Setup completed 2026-11-06 (setup-autodeploy.sh run in Cloud Shell).
 # Auto-deploy: every push to main rebuilds the container from this repo's
 # code and deploys it to the existing Cloud Run service. Keyless login via
 # Workload Identity Federation (set up once with setup-autodeploy.sh) - no
