@@ -6648,7 +6648,7 @@ def _get_gcp_access_token():
         return json.loads(resp.read().decode())["access_token"]
 
 
-def _ga4_run_report(property_id, access_token, days=1):
+def _ga4_run_report(property_id, access_token, days=1, limit=25):
     # pageTitle was previously included as a co-dimension, which caused a
     # real bug: if the same URL ever recorded two different titles (a
     # dynamic title, a stale cache, a query-string variant), GA4 returned
@@ -6660,7 +6660,7 @@ def _ga4_run_report(property_id, access_token, days=1):
         "dimensions": [{"name": "pagePath"}],
         "metrics": [{"name": "screenPageViews"}, {"name": "activeUsers"}],
         "orderBys": [{"metric": {"metricName": "screenPageViews"}, "desc": True}],
-        "limit": 25,
+        "limit": limit,
     }
     req = urllib.request.Request(
         f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport",
@@ -6694,6 +6694,57 @@ def _ga4_run_report(property_id, access_token, days=1):
     ]
     result["rows"] = merged_rows
     return result
+
+
+# ---------------------------------------------------------------------------
+# Top pages by real GA4 views - drives the homepage "Trending now" strip and
+# lets the owner see which tools are actually used (open
+# /api/top-pages?days=30 in a browser). Aggregate page-view counts only: no
+# user-level data, so it is safe to serve publicly. Cached for an hour so
+# homepage traffic never burns GA4 API quota.
+# ---------------------------------------------------------------------------
+_TOP_PAGES_CACHE = {}
+_TOP_PAGES_TTL = 3600
+
+@app.route('/api/top-pages', methods=['GET'])
+def top_pages():
+    try:
+        days = int(request.args.get("days", 7))
+    except ValueError:
+        days = 7
+    days = max(1, min(days, 90))
+    now = time.time()
+    hit = _TOP_PAGES_CACHE.get(days)
+    if hit and now - hit[0] < _TOP_PAGES_TTL:
+        return jsonify(hit[1])
+    property_id = os.environ.get("GA4_PROPERTY_ID")
+    if not property_id:
+        return jsonify({"ok": False, "error": "GA4 not configured"}), 503
+    try:
+        token = _get_gcp_access_token()
+        report = _ga4_run_report(property_id, token, days=days, limit=150)
+    except Exception as e:
+        # Serve the last good answer (even if expired) rather than nothing.
+        if hit:
+            return jsonify(hit[1])
+        return jsonify({"ok": False, "error": "GA4 unavailable"}), 502
+    merged = {}
+    for r in report.get("rows", []):
+        raw = r["dimensionValues"][0]["value"].strip("/")
+        slug = re.sub(r"\.html$", "", raw)
+        # Skip the homepage itself, admin/private pages and file-like noise.
+        if not slug or slug == "index" or slug.startswith("admin") or "." in slug:
+            continue
+        v = int(r["metricValues"][0]["value"])
+        u = int(r["metricValues"][1]["value"])
+        m = merged.setdefault(slug, {"slug": slug, "views": 0, "users": 0})
+        m["views"] += v
+        m["users"] += u
+    pages = sorted(merged.values(), key=lambda x: -x["views"])[:60]
+    out = {"ok": True, "days": days, "pages": pages,
+           "generated_at": datetime.now(timezone.utc).isoformat()}
+    _TOP_PAGES_CACHE[days] = (now, out)
+    return jsonify(out)
 
 
 GA4_DIGEST_STATE_FILE = "ga4-digest-state.json"
