@@ -8402,6 +8402,61 @@ def jewellery_feedback_list():
     return jsonify({"ok": True, "items": items, "total_ever": (data or {}).get("total_ever", len(items))})
 
 
+# ---------------------------------------------------------------------------
+# Site-wide feedback / reach-us form (homepage).
+# Goes ONLY to the Telegram alert. Nothing is written to the public site repo,
+# because a free-text "reach out to us" message can contain personal details.
+# ---------------------------------------------------------------------------
+_SF_CATEGORIES = {"idea", "request", "bug", "wrong_info", "praise", "other"}
+
+
+@app.route('/api/site-feedback', methods=['POST'])
+def site_feedback_submit():
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("website"):  # honeypot field, humans never fill it
+        return jsonify({"ok": True})
+    try:
+        rating = int(body.get("rating", 0) or 0)
+    except (TypeError, ValueError):
+        rating = 0
+    if rating < 0 or rating > 5:
+        rating = 0
+    category = body.get("category", "other")
+    if category not in _SF_CATEGORIES:
+        category = "other"
+    message = _jf_clean(body.get("message"), 1000)
+    contact = _jf_clean(body.get("contact"), 80)
+    page = _jf_clean(body.get("page"), 40) or "home"
+    lang = _jf_clean(body.get("lang"), 3)
+    if not rating and len(message) < 5:
+        return jsonify({"ok": False, "code": "need_input",
+                        "error": "Please pick a rating or write a few words."}), 400
+    if category in ("bug", "wrong_info", "request") and len(message) < 5:
+        return jsonify({"ok": False, "code": "need_message",
+                        "error": "Please add a few words so we can act on it."}), 400
+    if not _jf_rate_ok("sf:" + _jf_ip()):
+        return jsonify({"ok": False, "code": "rate",
+                        "error": "Too many submissions - please try again later."}), 429
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (bot_token and chat_id):
+        return jsonify({"ok": False, "error": "Feedback could not be recorded right now."}), 503
+    try:
+        import html as _html
+        stars = ("★" * rating + "☆" * (5 - rating)) if rating else "no rating"
+        text = ("<b>LawSticker site feedback</b>\n" + stars + " - " + _html.escape(category) +
+                "\nPage: " + _html.escape(page) + " / " + _html.escape(lang or "?") +
+                ("\n\n" + _html.escape(message) if message else "") +
+                ("\n\nContact: " + _html.escape(contact) if contact else ""))
+        res = send_telegram_to_all(bot_token, chat_id, text) or {}
+        if not any(v == "sent" for v in res.values()):
+            raise RuntimeError("telegram delivery failed")
+    except Exception:
+        return jsonify({"ok": False, "error": "Feedback could not be recorded right now."}), 503
+    return jsonify({"ok": True})
+
+
 X_PULSE_FILE = "x-pulse.json"
 
 
