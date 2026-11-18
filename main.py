@@ -8452,7 +8452,7 @@ def jewellery_feedback_submit():
             text = ("<b>Jewellery Suite feedback</b>\n" + stars + " - " + _html.escape(category) +
                     "\nTab: " + _html.escape(entry["metal"] or "?") + " / " + _html.escape(entry["mode"] or "?") +
                     " / " + _html.escape(entry["lang"] or "?") +
-                    ("\n\n" + _html.escape(message) if message else "") +
+                    ("\n\n💬 " + _html.escape(message) if message else "\n\n<i>(rating only: no message was written)</i>") +
                     ("\n\nContact: " + _html.escape(contact) if contact else ""))
             send_telegram_to_all(bot_token, chat_id, text)
         except Exception:
@@ -8500,6 +8500,8 @@ def jewellery_feedback_list():
 # because a free-text "reach out to us" message can contain personal details.
 # ---------------------------------------------------------------------------
 _SF_CATEGORIES = {"idea", "request", "bug", "wrong_info", "praise", "other"}
+_SF_LABELS = {"idea": "💡 Idea", "request": "🙋 Request", "bug": "🐞 Something broken", "wrong_info": "⚠️ Wrong information",
+              "praise": "👏 Praise", "other": "💬 Other"}
 
 
 @app.route('/api/site-feedback', methods=['POST'])
@@ -8518,7 +8520,7 @@ def site_feedback_submit():
         category = "other"
     message = _jf_clean(body.get("message"), 1000)
     contact = _jf_clean(body.get("contact"), 80)
-    page = _jf_clean(body.get("page"), 40) or "home"
+    page = _jf_clean(body.get("page"), 80) or "home"
     lang = _jf_clean(body.get("lang"), 3)
     if not rating and len(message) < 5:
         return jsonify({"ok": False, "code": "need_input",
@@ -8537,9 +8539,9 @@ def site_feedback_submit():
     try:
         import html as _html
         stars = ("★" * rating + "☆" * (5 - rating)) if rating else "no rating"
-        text = ("<b>LawSticker site feedback</b>\n" + stars + " - " + _html.escape(category) +
+        text = ("<b>LawSticker site feedback</b>\n" + stars + " · " + _html.escape(_SF_LABELS.get(category, category)) +
                 "\nPage: " + _html.escape(page) + " / " + _html.escape(lang or "?") +
-                ("\n\n" + _html.escape(message) if message else "") +
+                ("\n\n💬 " + _html.escape(message) if message else "\n\n<i>(rating only: no message was written)</i>") +
                 ("\n\nContact: " + _html.escape(contact) if contact else ""))
         res = send_telegram_to_all(bot_token, chat_id, text) or {}
         if not any(v == "sent" for v in res.values()):
