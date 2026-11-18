@@ -6747,6 +6747,98 @@ def top_pages():
     return jsonify(out)
 
 
+# ---------------------------------------------------------------------------
+# Live visitors from the GA4 Realtime API: people active in the last 5 and
+# 30 minutes, a per-minute trend, and the pages, devices and places they are
+# on. Aggregate counts only (no user-level data), so it is safe to serve
+# publicly. Cached for 60 seconds so a dashboard left open (or many viewers)
+# never burns the Realtime quota: at most ~5 GA4 requests a minute.
+# Totals come from dimensionless queries: summing activeUsers across pages
+# would double-count anyone who opened two pages.
+# ---------------------------------------------------------------------------
+_LIVE_CACHE = {"t": 0, "data": None}
+_LIVE_TTL = 60
+
+def _ga4_realtime(property_id, token, dims, metrics, start_min=29, limit=50):
+    body = {"metrics": [{"name": m} for m in metrics],
+            "minuteRanges": [{"startMinutesAgo": start_min, "endMinutesAgo": 0}],
+            "limit": limit}
+    if dims:
+        body["dimensions"] = [{"name": d} for d in dims]
+        body["orderBys"] = [{"metric": {"metricName": metrics[0]}, "desc": True}]
+    req = urllib.request.Request(
+        f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runRealtimeReport",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        res = json.loads(resp.read().decode())
+    out = []
+    for r in res.get("rows", []):
+        out.append(([d["value"] for d in r.get("dimensionValues", [])],
+                    [int(float(m["value"])) for m in r.get("metricValues", [])]))
+    return out
+
+def _clean_title(t):
+    t = (t or "").strip()
+    if t in ("LawSticker AI", ""):
+        return "Homepage" if t else "(untitled page)"
+    return re.sub(r"\s*[|·–-]\s*LawSticker AI\s*$", "", t).strip() or t
+
+@app.route('/api/live-users', methods=['GET'])
+def live_users():
+    now = time.time()
+    if _LIVE_CACHE["data"] and now - _LIVE_CACHE["t"] < _LIVE_TTL:
+        return jsonify(_LIVE_CACHE["data"])
+    property_id = os.environ.get("GA4_PROPERTY_ID")
+    if not property_id:
+        return jsonify({"ok": False, "error": "GA4 not configured"}), 503
+    try:
+        token = _get_gcp_access_token()
+        t30 = _ga4_realtime(property_id, token, [], ["activeUsers", "screenPageViews"])
+        t5 = _ga4_realtime(property_id, token, [], ["activeUsers"], start_min=4)
+        per_min = _ga4_realtime(property_id, token, ["minutesAgo"], ["activeUsers"], limit=30)
+        pages = _ga4_realtime(property_id, token, ["unifiedScreenName"], ["activeUsers", "screenPageViews"], limit=25)
+        devices = _ga4_realtime(property_id, token, ["deviceCategory"], ["activeUsers"], limit=5)
+        places = _ga4_realtime(property_id, token, ["city"], ["activeUsers"], limit=10)
+    except urllib.error.HTTPError as he:
+        if _LIVE_CACHE["data"]:
+            return jsonify(_LIVE_CACHE["data"])
+        return jsonify({"ok": False, "error": f"GA4 Realtime error {he.code}"}), 502
+    except Exception:
+        if _LIVE_CACHE["data"]:
+            return jsonify(_LIVE_CACHE["data"])
+        return jsonify({"ok": False, "error": "GA4 unavailable"}), 502
+    minutes = [0] * 30
+    for d, m in per_min:
+        try:
+            k = int(d[0])
+            if 0 <= k < 30: minutes[k] = m[0]
+        except ValueError:
+            pass
+    page_map = {}
+    for d, m in pages:
+        t = _clean_title(d[0])
+        e = page_map.setdefault(t, {"title": t, "users": 0, "views": 0})
+        e["users"] += m[0]; e["views"] += m[1]
+    out = {
+        "ok": True,
+        "active_5min": t5[0][1][0] if t5 else 0,
+        "active_30min": t30[0][1][0] if t30 else 0,
+        "views_30min": t30[0][1][1] if t30 else 0,
+        "per_minute": minutes,  # index 0 = this minute, 29 = 29 minutes ago
+        "pages": sorted(page_map.values(), key=lambda x: (-x["users"], -x["views"]))[:15],
+        "devices": [{"device": d[0], "users": m[0]} for d, m in devices],
+        "cities": [{"city": d[0], "users": m[0]} for d, m in places if d[0] and d[0] != "(not set)"][:8],
+        "source": "Google Analytics 4 Realtime",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "cache_seconds": _LIVE_TTL,
+    }
+    _LIVE_CACHE.update(t=now, data=out)
+    return jsonify(out)
+
+
 GA4_DIGEST_STATE_FILE = "ga4-digest-state.json"
 
 
