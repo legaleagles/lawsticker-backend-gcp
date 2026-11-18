@@ -253,6 +253,29 @@ def edit_telegram_message(bot_token, chat_id, message_id, text):
         return json.loads(resp.read().decode())
 
 
+def send_telegram_markup(bot_token, chat_id, text, buttons):
+    # Generic inline-keyboard sender: buttons is a list of rows of (label, callback_data).
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]},
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def edit_telegram_markup(bot_token, chat_id, message_id, text, buttons):
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+    payload = json.dumps({
+        "chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]},
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
 def answer_callback_query(bot_token, callback_query_id, text=""):
     url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
     payload = json.dumps({"callback_query_id": callback_query_id, "text": text}).encode()
@@ -4521,6 +4544,31 @@ def telegram_webhook():
             return jsonify({"ok": True})
         action, report_id = data.split(":", 1)
 
+        if action in ("fbok", "fbno", "fbdel"):
+            import html as _html
+            original_text = cq.get("message", {}).get("text", "")
+            base_text = original_text.split("\n\n— ")[0]
+            try:
+                fres = process_feedback_decision(action, report_id, base_text, site_token)
+            except Exception as fe:
+                fres = {"ok": False, "error": str(fe)[:150]}
+            tapper = cq.get("from", {}).get("first_name", "someone")
+            note = {"fbok": "✅ Published on the site", "fbno": "❌ Not published", "fbdel": "🗑 Removed from the site"}[action]
+            if bot_token and callback_id:
+                try:
+                    answer_callback_query(bot_token, callback_id, note if fres.get("ok") else fres.get("error", "Failed"))
+                except Exception:
+                    pass
+            if fres.get("ok") and bot_token and message_id:
+                btns = [[("🗑 Remove from site", "fbdel:" + report_id)]] if action == "fbok" else \
+                       [[("✅ Publish again", "fbok:" + report_id)]] if action == "fbdel" else []
+                try:
+                    edit_telegram_markup(bot_token, chat_id, message_id,
+                                         _html.escape(base_text) + f"\n\n— {note} by {_html.escape(tapper)}", btns)
+                except Exception:
+                    pass
+            return jsonify({"ok": True})
+
         result = process_scam_decision(report_id, action, site_token)
 
         if bot_token and callback_id:
@@ -8543,12 +8591,77 @@ def site_feedback_submit():
                 "\nPage: " + _html.escape(page) + " / " + _html.escape(lang or "?") +
                 ("\n\n💬 " + _html.escape(message) if message else "\n\n<i>(rating only: no message was written)</i>") +
                 ("\n\nContact: " + _html.escape(contact) if contact else ""))
-        res = send_telegram_to_all(bot_token, chat_id, text) or {}
-        if not any(v == "sent" for v in res.values()):
+        fid = format(int(time.time()), "x") + format(random.getrandbits(16), "04x")
+        buttons = [[("✅ Publish on site", "fbok:" + fid), ("❌ Don't publish", "fbno:" + fid)]]
+        sent = 0
+        for cid in [c.strip() for c in chat_id.split(",") if c.strip()]:
+            try:
+                send_telegram_markup(bot_token, cid, text, buttons); sent += 1
+            except Exception:
+                try:
+                    send_telegram(bot_token, cid, text); sent += 1
+                except Exception:
+                    pass
+        if not sent:
             raise RuntimeError("telegram delivery failed")
     except Exception:
         return jsonify({"ok": False, "error": "Feedback could not be recorded right now."}), 503
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Publishing approved feedback. Each feedback message in Telegram carries
+# "Publish on site" / "Don't publish" buttons. Nothing is stored before a
+# decision: on Publish, the entry is rebuilt from the Telegram message text
+# itself (whose format the route above controls) and appended to a public
+# JSON file the site reads. The contact line is never published. A published
+# entry can be taken down later with the "Remove from site" button.
+# ---------------------------------------------------------------------------
+SF_PUBLIC_FILE = "site-feedback-public.json"
+_SF_LABEL_TO_CAT = {v: k for k, v in _SF_LABELS.items()}
+
+
+def parse_site_feedback_text(text):
+    out = {"rating": 0, "category": "other", "page": "home", "lang": "en", "message": ""}
+    for line in (text or "").split("\n"):
+        line = line.strip()
+        m = re.match(r"^([★☆]{5}|no rating)\s*·\s*(.+)$", line)
+        if m:
+            out["rating"] = m.group(1).count("★")
+            out["category"] = _SF_LABEL_TO_CAT.get(m.group(2).strip(), "other")
+            continue
+        m = re.match(r"^Page:\s*(.+?)\s*/\s*([a-z?]{1,3})$", line)
+        if m:
+            out["page"] = m.group(1)[:80]
+            out["lang"] = m.group(2) if m.group(2) != "?" else "en"
+            continue
+        if line.startswith("💬 "):
+            out["message"] = line[2:].strip()[:1000]
+    return out
+
+
+def process_feedback_decision(action, fid, text, site_token):
+    if action == "fbno":
+        return {"ok": True}
+    if not site_token:
+        return {"ok": False, "error": "SITE_REPO_TOKEN missing"}
+    entry = parse_site_feedback_text(text)
+    if action == "fbok" and not entry["rating"] and not entry["message"]:
+        return {"ok": False, "error": "Nothing to publish"}
+    entry.update(id=fid, date=datetime.now(IST).date().isoformat())
+
+    def update(existing):
+        data = existing if isinstance(existing, dict) else {"entries": []}
+        entries = [e for e in data.get("entries", []) if e.get("id") != fid]
+        if action == "fbok":
+            entries.insert(0, entry)
+        data["entries"] = entries[:300]
+        data["updated_at"] = datetime.now(IST).isoformat()
+        return data
+
+    github_get_put_with_retry(SF_PUBLIC_FILE, site_token, update,
+                              ("Publish" if action == "fbok" else "Remove") + " site feedback " + fid)
+    return {"ok": True}
 
 
 X_PULSE_FILE = "x-pulse.json"
@@ -9798,6 +9911,54 @@ def metal_direction():
         "track": _md_track_record(hist),
     })
 
+
+
+# ---------------------------------------------------------------------------
+# Telegram button taps (feedback Publish / Don't publish) only reach the backend
+# if the bot's webhook points at /api/telegram-webhook. On startup, register it
+# when no webhook is set at all; never overwrite a different existing webhook.
+# /api/telegram-webhook-status shows the current state (no secrets in it).
+# ---------------------------------------------------------------------------
+TG_WEBHOOK_URL = "https://lawsticker-backend-494996217030.europe-west1.run.app/api/telegram-webhook"
+
+
+def _tg_call(method, payload=None):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+    req = urllib.request.Request(f"https://api.telegram.org/bot{bot_token}/{method}",
+                                 data=json.dumps(payload or {}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _ensure_tg_webhook():
+    try:
+        info = _tg_call("getWebhookInfo").get("result", {})
+        if not info.get("url"):
+            _tg_call("setWebhook", {"url": TG_WEBHOOK_URL, "allowed_updates": ["callback_query"]})
+            print("Telegram webhook registered:", TG_WEBHOOK_URL, flush=True)
+        elif info.get("url") != TG_WEBHOOK_URL:
+            print("Telegram webhook points elsewhere, left unchanged:", info.get("url"), flush=True)
+    except Exception as e:
+        print("Telegram webhook check failed:", str(e)[:200], flush=True)
+
+
+@app.route('/api/telegram-webhook-status', methods=['GET'])
+def telegram_webhook_status():
+    try:
+        info = _tg_call("getWebhookInfo").get("result", {})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 502
+    return jsonify({"ok": True, "url": info.get("url", ""), "points_here": info.get("url") == TG_WEBHOOK_URL,
+                    "pending_update_count": info.get("pending_update_count", 0),
+                    "last_error_message": info.get("last_error_message", ""),
+                    "allowed_updates": info.get("allowed_updates", [])})
+
+
+if os.environ.get("K_SERVICE"):  # only on Cloud Run, not in local tests
+    threading.Thread(target=_ensure_tg_webhook, daemon=True).start()
 
 
 if __name__ == '__main__':
