@@ -9957,6 +9957,201 @@ def telegram_webhook_status():
                     "allowed_updates": info.get("allowed_updates", [])})
 
 
+
+# ---------------------------------------------------------------------------
+# Visitor log: who is on the site right now, at the level of one visitor.
+# GA4 never exposes IP addresses (Google forbids it), so the site sends a tiny
+# beacon (visit.js) on each page view and we record it here together with the
+# IP the request came from and the browser's user-agent. Each hit is written
+# as one structured line to stdout, which Cloud Logging keeps (30 days by
+# default) - that is the store the admin view reads, so nothing is lost when
+# Cloud Run scales to zero. A small in-memory buffer covers the gap while
+# Cloud Logging ingests (a few seconds) or if the log read fails.
+# Nothing here is public: the read endpoint needs the admin password.
+# ---------------------------------------------------------------------------
+import collections as _collections
+_VISITS = _collections.deque(maxlen=4000)
+_VISIT_GEO = {}          # ip -> geo dict (cached for the life of the instance)
+_VISIT_BOT_RE = re.compile(r"bot|crawl|spider|slurp|headless|lighthouse|preview|facebookexternalhit|whatsapp/|python|curl|wget", re.I)
+_GCP_PROJECT = os.environ.get("GCP_PROJECT_ID", "gen-lang-client-0984437242")
+
+
+def _visit_str(v, n):
+    return str(v or "")[:n]
+
+
+@app.route('/api/visit', methods=['POST'])
+def record_visit():
+    # Sent with navigator.sendBeacon as text/plain, so no CORS preflight.
+    ua = request.headers.get("User-Agent", "")
+    if not ua or _VISIT_BOT_RE.search(ua):
+        return ("", 204)
+    raw = request.get_data(cache=False, as_text=True)[:3000]
+    try:
+        d = json.loads(raw) if raw else {}
+    except ValueError:
+        return ("", 204)
+    if not isinstance(d, dict):
+        return ("", 204)
+    now = datetime.now(timezone.utc)
+    hit = {
+        "kind": "site_visit",
+        "id": hashlib.sha1(f"{now.timestamp()}{random.random()}".encode()).hexdigest()[:12],
+        "ts": now.isoformat(),
+        "ip": get_client_ip(),
+        "ua": ua[:400],
+        "path": _visit_str(d.get("p"), 300),
+        "title": _visit_str(d.get("t"), 160),
+        "ref": _visit_str(d.get("r"), 300),
+        "vid": _visit_str(d.get("v"), 40),
+        "sid": _visit_str(d.get("s"), 40),
+        "scr": _visit_str(d.get("w"), 20),
+        "lang": _visit_str(d.get("l"), 40),
+        "tz": _visit_str(d.get("z"), 60),
+        "src": _visit_str(d.get("u"), 120),   # utm_source / ?src= campaign tag, if any
+        "model": _visit_str(d.get("m"), 60),  # phone model from Chrome's client hints, if shared
+    }
+    _VISITS.append(hit)
+    print(json.dumps({"severity": "INFO", "message": f"visit {hit['path']}", **hit}), flush=True)
+    return ("", 204)
+
+
+def _visits_from_cloud_logging(since):
+    token = _get_gcp_access_token()
+    flt = ('jsonPayload.kind="site_visit" AND timestamp>="%s"' % since.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    out, page_token = [], None
+    for _ in range(6):   # up to 6 x 1000 hits per request
+        body = {"resourceNames": [f"projects/{_GCP_PROJECT}"], "filter": flt,
+                "orderBy": "timestamp desc", "pageSize": 1000}
+        if page_token:
+            body["pageToken"] = page_token
+        req = urllib.request.Request("https://logging.googleapis.com/v2/entries:list",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                                     method="POST")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            res = json.loads(resp.read().decode())
+        for e in res.get("entries", []):
+            p = e.get("jsonPayload") or {}
+            if p.get("kind") == "site_visit":
+                out.append(p)
+        page_token = res.get("nextPageToken")
+        if not page_token:
+            break
+    return out
+
+
+def _visit_geo_lookup(ips):
+    # ip-api.com batch endpoint: up to 100 IPs per call, no key needed.
+    todo = [ip for ip in ips if ip and ip not in _VISIT_GEO and ip != "unknown"]
+    for i in range(0, len(todo), 100):
+        chunk = todo[i:i + 100]
+        try:
+            req = urllib.request.Request(
+                "http://ip-api.com/batch?fields=status,country,regionName,city,isp,org,as,mobile,proxy,hosting,query",
+                data=json.dumps(chunk).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                for g in json.loads(resp.read().decode()):
+                    if g.get("status") == "success":
+                        _VISIT_GEO[g["query"]] = {
+                            "city": g.get("city", ""), "region": g.get("regionName", ""), "country": g.get("country", ""),
+                            "isp": g.get("isp", "") or g.get("org", ""), "mobile": bool(g.get("mobile")),
+                            "vpn": bool(g.get("proxy")), "hosting": bool(g.get("hosting"))}
+        except Exception:
+            break
+    return {ip: _VISIT_GEO.get(ip) for ip in ips}
+
+
+def _parse_ua(ua):
+    ua = ua or ""
+    os_name, device, browser = "Other", "Desktop", "Other"
+    m = re.search(r"Android ([\d.]+)", ua)
+    if m:
+        os_name, device = f"Android {m.group(1).split('.')[0]}", "Phone"
+        mm = re.search(r"Android [\d.]+; (?:[a-z]{2}-[a-z]{2}; )?([^;)]+?)(?: Build/|\))", ua)
+        if mm and mm.group(1).strip() not in ("K", "wv"):
+            device = mm.group(1).strip()
+        if "Mobile" not in ua:
+            device = "Tablet" if device == "Phone" else device
+    elif "iPhone" in ua:
+        m = re.search(r"OS (\d+)", ua); os_name, device = f"iOS {m.group(1) if m else ''}".strip(), "iPhone"
+    elif "iPad" in ua:
+        os_name, device = "iPadOS", "iPad"
+    elif "Windows NT" in ua:
+        os_name = "Windows"
+    elif "Mac OS X" in ua:
+        os_name = "macOS"
+    elif "CrOS" in ua:
+        os_name = "ChromeOS"
+    elif "Linux" in ua:
+        os_name = "Linux"
+    for pat, name in ((r"Instagram", "Instagram app"), (r"FBAN|FBAV", "Facebook app"), (r"LinkedInApp", "LinkedIn app"),
+                      (r"Telegram", "Telegram app"), (r"SamsungBrowser", "Samsung Internet"), (r"EdgA?/", "Edge"),
+                      (r"OPR/|Opera", "Opera"), (r"Firefox/|FxiOS", "Firefox"), (r"CriOS", "Chrome"),
+                      (r"; wv\)", "Android app (WebView)"), (r"Chrome/", "Chrome"), (r"Safari/", "Safari")):
+        if re.search(pat, ua):
+            browser = name
+            break
+    return {"os": os_name, "device": device, "browser": browser}
+
+
+@app.route('/api/visitors', methods=['GET'])
+def visitors_admin():
+    if not check_tender_scrutiny_password(request.headers.get("X-Admin-Password", "")):
+        return jsonify({"ok": False, "error": "Wrong or missing admin password."}), 401
+    try:
+        hours = max(1, min(int(request.args.get("hours", 24)), 24 * 30))
+    except ValueError:
+        hours = 24
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    source, note = "cloud_logging", ""
+    try:
+        hits = _visits_from_cloud_logging(since)
+    except Exception as e:
+        hits, source = [], "memory"
+        note = f"Cloud Logging read failed ({str(e)[:120]}); showing only hits since the server last started."
+    seen = {h.get("id") for h in hits}
+    since_iso = since.isoformat()
+    hits += [h for h in list(_VISITS) if h.get("id") not in seen and h.get("ts", "") >= since_iso]
+    hits.sort(key=lambda h: h.get("ts", ""))
+
+    groups = {}
+    for h in hits:
+        key = h.get("vid") or f"ip:{h.get('ip')}|{h.get('ua', '')[:60]}"
+        g = groups.get(key)
+        if not g:
+            g = groups[key] = {"visitor": key if h.get("vid") else "", "first": h["ts"], "last": h["ts"], "ips": [],
+                               "ua": h.get("ua", ""), "ref": h.get("ref", ""), "src": h.get("src", ""),
+                               "scr": h.get("scr", ""), "lang": h.get("lang", ""), "tz": h.get("tz", ""),
+                               "model": h.get("model", ""), "sessions": set(), "pages": []}
+        g["last"] = h["ts"]
+        if h.get("ip") and h["ip"] not in g["ips"]:
+            g["ips"].append(h["ip"])
+        if h.get("sid"):
+            g["sessions"].add(h["sid"])
+        if not g["ref"] and h.get("ref"):
+            g["ref"] = h["ref"]
+        if not g["src"] and h.get("src"):
+            g["src"] = h["src"]
+        g["pages"].append({"ts": h["ts"], "path": h.get("path", ""), "title": h.get("title", "")})
+
+    geo = _visit_geo_lookup(sorted({ip for g in groups.values() for ip in g["ips"]}))
+    out = []
+    for g in groups.values():
+        g.update(_parse_ua(g["ua"]))
+        if g.get("model"):
+            g["device"] = g["model"]
+        g["sessions"] = len(g["sessions"]) or 1
+        g["views"] = len(g["pages"])
+        g["places"] = [dict(ip=ip, **(geo.get(ip) or {})) for ip in g["ips"]]
+        g["pages"] = g["pages"][-60:]
+        out.append(g)
+    out.sort(key=lambda g: g["last"], reverse=True)
+    return jsonify({"ok": True, "hours": hours, "source": source, "note": note,
+                    "hits": len(hits), "visitors": len(out), "rows": out[:500],
+                    "generated_at": datetime.now(timezone.utc).isoformat()})
+
+
 if os.environ.get("K_SERVICE"):  # only on Cloud Run, not in local tests
     threading.Thread(target=_ensure_tg_webhook, daemon=True).start()
 
