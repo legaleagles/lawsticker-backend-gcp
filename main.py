@@ -3951,8 +3951,30 @@ def call_gemini_askai(api_key, prompt, image_base64=None, image_mime_type=None):
         return None
 
 
+_ASK_AI_HITS = {}
+_ASK_AI_MAX_PER_HOUR = 40
+
+
+def _ask_ai_rate_ok():
+    # In-memory per-IP cap so a scraper or bot can't run up the Gemini bill.
+    # 40 questions an hour is far above what a real person asks.
+    ip, now = get_client_ip(), time.time()
+    hits = [t for t in _ASK_AI_HITS.get(ip, []) if now - t < 3600]
+    if len(hits) >= _ASK_AI_MAX_PER_HOUR:
+        _ASK_AI_HITS[ip] = hits
+        return False
+    hits.append(now)
+    _ASK_AI_HITS[ip] = hits
+    if len(_ASK_AI_HITS) > 5000:
+        for k in [k for k, v in _ASK_AI_HITS.items() if not v or now - v[-1] > 3600]:
+            _ASK_AI_HITS.pop(k, None)
+    return True
+
+
 @app.route('/api/ask-ai', methods=['POST'])
 def ask_ai():
+    if not _ask_ai_rate_ok():
+        return jsonify({"ok": False, "error": "Too many questions from this network in the last hour. Please try again a little later."}), 429
     site_token = os.environ.get("SITE_REPO_TOKEN")
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not site_token or not gemini_key:
@@ -9185,7 +9207,9 @@ def check_and_record_rate_limit(action_name):
     # resume is stored" commitment. Auto-prunes entries older than the
     # window on every call, so this file never grows unbounded.
     site_token = os.environ.get("SITE_REPO_TOKEN")
-    ip = get_client_ip()
+    # The rate-limit file lives in the public site repo, so store a salted
+    # hash of the IP, never the IP itself.
+    ip = hashlib.sha256(("ls-rl|" + get_client_ip()).encode()).hexdigest()[:16]
     now = datetime.now(timezone.utc).timestamp()
 
     if not site_token:
@@ -10144,6 +10168,12 @@ def visitors_admin():
         g["sessions"] = len(g["sessions"]) or 1
         g["views"] = len(g["pages"])
         g["places"] = [dict(ip=ip, **(geo.get(ip) or {})) for ip in g["ips"]]
+        # Likely bot: data-centre / VPN IP, or a single hit with a desktop
+        # Linux browser or an outdated Android from outside India.
+        p0 = g["places"][0] if g["places"] else {}
+        foreign = bool(p0.get("country")) and p0.get("country") != "India"
+        g["likely_bot"] = bool(p0.get("hosting") or p0.get("vpn")
+                               or (foreign and g["views"] <= 2 and g["sessions"] <= 1))
         g["pages"] = g["pages"][-60:]
         out.append(g)
     out.sort(key=lambda g: g["last"], reverse=True)
