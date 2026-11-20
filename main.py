@@ -10182,6 +10182,140 @@ def visitors_admin():
                     "generated_at": datetime.now(timezone.utc).isoformat()})
 
 
+
+# ---------------------------------------------------------------------------
+# Star ratings for study pages. Aggregates only (count, sum, 1-5 histogram,
+# page title) go to data/ratings.json in the site repo, which pages read
+# directly as a static file - no backend call needed to show the stars.
+# Nothing about the rater is stored. One rating per device is enforced in
+# the browser (it remembers its own rating and sends the old value when
+# the visitor changes it), with a per-IP hourly cap against bots.
+# ---------------------------------------------------------------------------
+RATINGS_FILE = "data/ratings.json"
+_RATE_HITS = {}
+_RATE_PATH_RE = re.compile(r"^/[a-z0-9][a-z0-9\-_/\.]{0,150}$")
+
+
+def _rating_ip_ok(limit=20, window=3600):
+    ip, now = get_client_ip(), time.time()
+    hits = [t for t in _RATE_HITS.get(ip, []) if now - t < window]
+    if len(hits) >= limit:
+        _RATE_HITS[ip] = hits
+        return False
+    hits.append(now)
+    _RATE_HITS[ip] = hits
+    if len(_RATE_HITS) > 3000:
+        for k in list(_RATE_HITS)[:1500]:
+            _RATE_HITS.pop(k, None)
+    return True
+
+
+@app.route('/api/rate', methods=['POST'])
+def rate_page():
+    ua = request.headers.get("User-Agent", "")
+    if not ua or _VISIT_BOT_RE.search(ua):
+        return jsonify({"ok": False}), 400
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("website"):            # honeypot
+        return jsonify({"ok": True})
+    path = str(body.get("p") or "").lower().split("?")[0].split("#")[0]
+    path = re.sub(r"index\.html$", "", path)
+    try:
+        r = int(body.get("r")); old = int(body.get("o") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad rating"}), 400
+    if not _RATE_PATH_RE.match(path) or ".." in path or not (1 <= r <= 5) or not (0 <= old <= 5):
+        return jsonify({"ok": False, "error": "bad rating"}), 400
+    if not path.endswith((".html", "/")):
+        return jsonify({"ok": False, "error": "bad page"}), 400
+    if not _rating_ip_ok():
+        return jsonify({"ok": False, "error": "Too many ratings from this network. Try again later."}), 429
+    title = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f<>]", " ", str(body.get("t") or ""))).strip()[:90]
+    token = os.environ.get("SITE_REPO_TOKEN")
+    if not token:
+        return jsonify({"ok": False, "error": "Not configured"}), 503
+    if old == r:
+        return jsonify({"ok": True, "unchanged": True})
+
+    def update(data):
+        data = data if isinstance(data, dict) else {}
+        pages = data.setdefault("pages", {})
+        if path not in pages and len(pages) >= 1500:
+            raise ValueError("full")
+        e = pages.setdefault(path, {"n": 0, "s": 0, "c": [0, 0, 0, 0, 0], "t": ""})
+        if old and e["c"][old - 1] > 0:
+            e["c"][old - 1] -= 1; e["s"] -= old
+        else:
+            e["n"] += 1
+        e["c"][r - 1] += 1; e["s"] += r
+        if title:
+            e["t"] = title
+        data["updated"] = datetime.now(timezone.utc).isoformat()
+        return data
+    try:
+        data = github_get_put_with_retry(RATINGS_FILE, token, update, f"Rating {r}/5: {path}")
+    except Exception as ex:
+        return jsonify({"ok": False, "error": "Could not save the rating. Please try again."}), 502
+    e = data["pages"][path]
+    return jsonify({"ok": True, "n": e["n"], "avg": round(e["s"] / e["n"], 2) if e["n"] else 0})
+
+
+# ---------------------------------------------------------------------------
+# All-time site numbers for the homepage, from GA4 (which has the history
+# since the site launched - the visitor log only started in Nov 2026).
+# Aggregates only; cached 6 hours.
+# ---------------------------------------------------------------------------
+_SITE_STATS_CACHE = {"t": 0, "data": None}
+
+
+def _ga4_report_raw(property_id, token, body):
+    req = urllib.request.Request(
+        f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
+
+
+@app.route('/api/site-stats', methods=['GET'])
+def site_stats():
+    now = time.time()
+    if _SITE_STATS_CACHE["data"] and now - _SITE_STATS_CACHE["t"] < 6 * 3600:
+        return jsonify(_SITE_STATS_CACHE["data"])
+    property_id = os.environ.get("GA4_PROPERTY_ID")
+    if not property_id:
+        return jsonify({"ok": False, "error": "GA4 not configured"}), 503
+    rng = [{"startDate": "2020-01-01", "endDate": "today"}]
+    try:
+        token = _get_gcp_access_token()
+        tot = _ga4_report_raw(property_id, token, {"dateRanges": rng,
+              "metrics": [{"name": "totalUsers"}, {"name": "screenPageViews"}, {"name": "sessions"}]})
+        nvr = _ga4_report_raw(property_id, token, {"dateRanges": rng, "dimensions": [{"name": "newVsReturning"}],
+              "metrics": [{"name": "activeUsers"}]})
+        first = _ga4_report_raw(property_id, token, {"dateRanges": rng, "dimensions": [{"name": "date"}],
+              "metrics": [{"name": "sessions"}], "orderBys": [{"dimension": {"dimensionName": "date"}}], "limit": 1})
+    except Exception:
+        if _SITE_STATS_CACHE["data"]:
+            return jsonify(_SITE_STATS_CACHE["data"])
+        return jsonify({"ok": False, "error": "GA4 unavailable"}), 502
+    mv = (tot.get("rows") or [{}])[0].get("metricValues", [{"value": 0}] * 3)
+    users, views, sessions = (int(float(x["value"])) for x in mv)
+    returning = 0
+    for row in nvr.get("rows", []):
+        if row["dimensionValues"][0]["value"] == "returning":
+            returning = int(float(row["metricValues"][0]["value"]))
+    since = ""
+    if first.get("rows"):
+        d = first["rows"][0]["dimensionValues"][0]["value"]
+        since = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    out = {"ok": True, "users": users, "page_views": views, "sessions": sessions,
+           "returning_users": returning, "returning_pct": round(100 * returning / users) if users else 0,
+           "since": since, "source": "Google Analytics 4",
+           "generated_at": datetime.now(timezone.utc).isoformat()}
+    _SITE_STATS_CACHE.update(t=now, data=out)
+    return jsonify(out)
+
+
 if os.environ.get("K_SERVICE"):  # only on Cloud Run, not in local tests
     threading.Thread(target=_ensure_tg_webhook, daemon=True).start()
 
